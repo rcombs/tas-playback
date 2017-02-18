@@ -1,28 +1,3 @@
-/**
- * Gamecube controller to Nintendo 64 adapter
- * by Andrew Brown
- */
-
-/**
- * To use, hook up the following to the Arduino Duemilanove:
- * Digital I/O 2: Gamecube controller serial line
- * Digital I/O 8: N64 serial line
- * All appropriate grounding and power lines
- * A 1K resistor to bridge digital I/O 2 and the 3.3V supply
- *
- * The pin-out for the N64 and Gamecube wires can be found here:
- * http://svn.navi.cx/misc/trunk/wasabi/devices/cube64/hardware/cube64-basic.pdf
- * Note: that diagram is not for this project, but for a similar project which
- * uses a PIC microcontroller. However, the diagram does describe the pinouts
- * of the gamecube and N64 wires.
- *
- * Also note: the N64 supplies a 3.3 volt line, but I don't plug that into
- * anything.  The arduino can't run off of that many volts, it needs more, so
- * it's powered externally. Additionally, the arduino has its own 3.3 volt
- * supply that I use to power the Gamecube controller. Therefore, only two lines
- * from the N64 are used.
- */
-
 /*
  Copyright (c) 2009 Andrew Brown
  Permission is hereby granted, free of charge, to any person
@@ -43,7 +18,7 @@
  WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
  FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
  OTHER DEALINGS IN THE SOFTWARE.
- */
+*/
 
 #include "pins_arduino.h"
 
