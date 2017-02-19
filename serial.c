@@ -6,15 +6,21 @@
 #include <stdio.h>
 #include <errno.h>
 
+#define INPUT_SIZE 4
+#define INPUT_BATCH 8
+
 int main(int argc, const char** argv)
 {
-  int ret;
   if (argc != 3)
     return 1;
+  char dataBuf[INPUT_SIZE * 1024 * 1024];
+  int ret;
   int infd = open(argv[1], O_RDONLY);
   int outfd = open(argv[2], O_RDWR | O_NOCTTY);
 
-  printf("READY\n");
+  ret = read(infd, &dataBuf, sizeof(dataBuf));
+
+  printf("READY : %i\n", ret);
 
   speed_t baud = B115200;
 
@@ -27,7 +33,8 @@ int main(int argc, const char** argv)
 
   char buf[1024];
   char printBuf[1024] = {0};
-  char outBuf[1024 * 4] = {0};
+  char outBuf[1024 * INPUT_SIZE * INPUT_BATCH] = {0};
+  int i = 0;
   while ((ret = read(outfd, buf, sizeof(buf))) > 0) {
     int sendCount = 0;
     int readCount = ret;
@@ -39,12 +46,10 @@ int main(int argc, const char** argv)
       }
     }
     if (sendCount) {
-      int count = sendCount * 4;
-      ret = read(infd, outBuf, count);
-      if (ret <= 0)
-        return ret;
-      write(outfd, outBuf, ret);
-      if (ret < count)
+      int count = sendCount * INPUT_SIZE * INPUT_BATCH;
+      write(outfd, &dataBuf[i], count);
+      i += count;
+      if (i >= sizeof(dataBuf))
         return 0;
     }
     if (readCount != sendCount) {

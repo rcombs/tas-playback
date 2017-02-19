@@ -41,12 +41,19 @@ static unsigned char zero_y;
 static unsigned char n64_buffer[33], command_buffer[33];
 
 static void get_n64_command();
+static void readSerial();
 
 #include "crc_table.h"
 
 #include <RingBuf.h>
 
 RingBuf *buf;
+
+#define BUF_COUNT 0x80
+#define INPUT_SIZE 4
+#define INPUT_BATCH 8
+#define HEADER_SIZE 0x400
+#define MS_TIMEOUT 10
 
 void setup()
 {
@@ -63,25 +70,33 @@ void setup()
   digitalWrite(N64_PIN, LOW);
   pinMode(N64_PIN, INPUT);
 
-  for (i = 0; i < 0x400; i += 4) {
+  for (i = 0; i < HEADER_SIZE; i += INPUT_SIZE * INPUT_BATCH) {
     Serial.write(0);
     Serial.flush();
-    while (Serial.read() == -1) {}
-    while (Serial.read() == -1) {}
-    while (Serial.read() == -1) {}
-    while (Serial.read() == -1) {}
+    for (int j = 0; j < INPUT_SIZE * INPUT_BATCH; j++)
+      while (Serial.read() == -1) {}
   }
 
   Serial.println("DONE");
 
-  buf = RingBuf_new(4, 100);
-  Serial.write(0);
+  buf = RingBuf_new(INPUT_SIZE, BUF_COUNT);
+
+  noInterrupts();
+  while (!buf->isFull(buf)) {
+    readSerial();
+  }
+  interrupts();
+  
+  if (!buf) {
+    Serial.println("ENOMEM");
+  }
     /*Serial.write(0);
     Serial.write(0);
     Serial.write(0);
     Serial.write(0);
     Serial.write(0);*/
   Serial.flush();
+  noInterrupts();
 }
 
 /**
@@ -209,15 +224,24 @@ inner_loop:
 
 }
 
-void readSerial()
+static void readSerial()
 {
+  int ms = millis();
+  int currentMs = ms;
   digitalWrite(13, HIGH);
-  while (!buf->isFull(buf) && (Serial.available() >= 4 || buf->isEmpty(buf)))
+  while (buf->numElements(buf) <= (BUF_COUNT - INPUT_BATCH) && ((currentMs < ms + MS_TIMEOUT) || buf->isEmpty(buf)))
   {
-    char localBuf[4];
-    Serial.write(0);
-    Serial.readBytes(localBuf, 4);
-    buf->add(buf, localBuf);
+    while (bit_is_clear(UCSR0A, UDRE0));
+    UDR0 = 0;
+    for (int i = 0; i < INPUT_BATCH; i++) {
+      char localBuf[4];
+      for (int j = 0; j < INPUT_SIZE; j++) {
+        while (!(UCSR0A & (1<<RXC0)));
+        localBuf[j] = UDR0;
+      }
+      buf->add(buf, localBuf);
+    }
+    currentMs = millis();
   }
   digitalWrite(13, LOW);
 }
@@ -231,7 +255,6 @@ void loop()
 
     // Wait for incomming 64 command
     // this will block until the N64 sends us a command
-    noInterrupts();
     get_n64_command();
 
     // 0x00 is identify command
@@ -261,8 +284,12 @@ void loop()
             break;
         case 0x01:
             // blast out the pre-assembled array in n64_buffer
-            if (!buf->pull(buf, command_buffer))
+            if (!buf->pull(buf, command_buffer)) {
+              interrupts();
               Serial.println("Out of commands!");
+              Serial.flush();
+              noInterrupts();
+            }
             n64_send(command_buffer, 4, 0);
 
             //Serial.println("It was 0x01: the query command");
@@ -333,8 +360,6 @@ void loop()
             break;
 
     }
-
-    interrupts();
 }
 
 /**
