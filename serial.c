@@ -9,11 +9,12 @@
 #define INPUT_SIZE 4
 #define INPUT_BATCH 8
 
+char dataBuf[INPUT_SIZE * 1024 * 1024 * 8];
+
 int main(int argc, const char** argv)
 {
   if (argc != 3)
     return 1;
-  char dataBuf[INPUT_SIZE * 1024 * 1024];
   int ret;
   int infd = open(argv[1], O_RDONLY);
   int outfd = open(argv[2], O_RDWR | O_NOCTTY);
