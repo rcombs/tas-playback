@@ -41,11 +41,11 @@ int main(int argc, const char** argv)
   while ((ret = read(outfd, buf, sizeof(buf))) > 0) {
     int sendCount = 0;
     int readCount = ret;
-    for (int i = 0; i < ret; i++) {
-      if (buf[i] == 0) {
+    for (int j = 0; j < ret; j++) {
+      if (buf[j] == 0) {
         sendCount++;
       } else {
-        printBuf[i - sendCount] = buf[i];
+        printBuf[j - sendCount] = buf[j];
       }
     }
     if (sendCount) {
