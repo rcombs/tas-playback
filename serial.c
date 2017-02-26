@@ -19,6 +19,8 @@ int main(int argc, const char** argv)
   int infd = open(argv[1], O_RDONLY);
   int outfd = open(argv[2], O_RDWR | O_NOCTTY);
 
+  setvbuf(stdout, NULL, _IOLBF, 1024);
+
   ret = read(infd, &dataBuf, sizeof(dataBuf));
 
   printf("READY : %i\n", ret);
