@@ -1,26 +1,28 @@
 /*
- Copyright (c) 2009 Andrew Brown
- Permission is hereby granted, free of charge, to any person
- obtaining a copy of this software and associated documentation
- files (the "Software"), to deal in the Software without
- restriction, including without limitation the rights to use,
- copy, modify, merge, publish, distribute, sublicense, and/or sell
- copies of the Software, and to permit persons to whom the
- Software is furnished to do so, subject to the following
- conditions:
- The above copyright notice and this permission notice shall be
- included in all copies or substantial portions of the Software.
- THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
- EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
- OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
- NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
- HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
- WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
- OTHER DEALINGS IN THE SOFTWARE.
-*/
+ * Copyright (c) 2009 Andrew Brown
+ * Permission is hereby granted, free of charge, to any person
+ * obtaining a copy of this software and associated documentation
+ * files (the "Software"), to deal in the Software without
+ * restriction, including without limitation the rights to use,
+ * copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following
+ * conditions:
+ * The above copyright notice and this permission notice shall be
+ * included in all copies or substantial portions of the Software.
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+ * OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+ * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+ * HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+ * WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+ * OTHER DEALINGS IN THE SOFTWARE.
+ */
 
 #include "pins_arduino.h"
+
+#include "../config.h"
 
 #define N64_PIN 8
 #define N64_HIGH DDRB &= ~0x01
@@ -32,16 +34,12 @@ static char n64_raw_dump[281]; // maximum recv is 1+2+32 bytes + 1 bit
 // n64_command:
 static unsigned char n64_command;
 
-// Zero points for the GC controller stick
-static unsigned char zero_x;
-static unsigned char zero_y;
-
 // bytes to send to the 64
 // maximum we'll need to send is 33, 32 for a read request and 1 CRC byte
 static unsigned char n64_buffer[33], command_buffer[33];
 
 static void get_n64_command();
-static void readSerial();
+static void readSerial(bool timeout);
 
 #include "crc_table.h"
 
@@ -49,18 +47,47 @@ static void readSerial();
 
 RingBuf *buf;
 
-#define BUF_COUNT 0x80
-#define INPUT_SIZE 4
-#define INPUT_BATCH 8
-#define HEADER_SIZE 0x400
-#define MS_TIMEOUT 10
+bool finished = false;
+
+void writeByte(char byte)
+{
+  while (bit_is_clear(UCSR0A, UDRE0));
+  UDR0 = byte;
+}
+
+void writeString(const char *string)
+{
+  while (string && *string)
+    writeByte(*string++);
+}
+
+void writeLine(const char *line)
+{
+  writeString(line);
+  writeByte('\n');
+}
+
+int readByteNow()
+{
+  if (!(UCSR0A & (1<<RXC0)))
+    return -1;
+  return UDR0;
+}
+
+byte readByte()
+{
+  int byte;
+  while ((byte = readByteNow()) == -1);
+  return byte;
+}
 
 void setup()
 {
-  int i;
   Serial.begin(115200);
 
-  Serial.println("HELLO");
+  noInterrupts();
+
+  writeLine("Starting up");
 
   // Status LED
   digitalWrite(13, LOW);
@@ -70,33 +97,16 @@ void setup()
   digitalWrite(N64_PIN, LOW);
   pinMode(N64_PIN, INPUT);
 
-  for (i = 0; i < HEADER_SIZE; i += INPUT_SIZE * INPUT_BATCH) {
-    Serial.write(0);
-    Serial.flush();
-    for (int j = 0; j < INPUT_SIZE * INPUT_BATCH; j++)
-      while (Serial.read() == -1) {}
-  }
-
-  Serial.println("DONE");
-
   buf = RingBuf_new(INPUT_SIZE, BUF_COUNT);
 
-  noInterrupts();
-  while (!buf->isFull(buf)) {
-    readSerial();
-  }
-  interrupts();
-  
   if (!buf) {
-    Serial.println("ENOMEM");
+    writeLine("ENOMEM");
+    exit(-1);
   }
-    /*Serial.write(0);
-    Serial.write(0);
-    Serial.write(0);
-    Serial.write(0);
-    Serial.write(0);*/
-  Serial.flush();
-  noInterrupts();
+
+  readSerial(false);
+
+  writeLine("Buffer full");
 }
 
 /**
@@ -108,7 +118,7 @@ static void n64_send(unsigned char *buffer, char length, bool wide_stop)
     asm volatile (";Starting N64 Send Routine");
     // Send these bytes
     char bits;
-    
+
     // This routine is very carefully timed by examining the assembly output.
     // Do not change any statements, it could throw the timings off
     //
@@ -118,7 +128,7 @@ static void n64_send(unsigned char *buffer, char length, bool wide_stop)
     // I use manually constructed for-loops out of gotos so I have more control
     // over the outputted assembly. I can insert nops where it was impossible
     // with a for loop
-    
+
     asm volatile (";Starting outer for loop");
 outer_loop:
     {
@@ -137,33 +147,32 @@ inner_loop:
                 // remain low for 1us, then go high for 3us
                 // nop block 1
                 asm volatile ("nop\nnop\nnop\nnop\nnop\n");
-                
+
                 asm volatile (";Setting line to high");
                 N64_HIGH;
 
                 // nop block 2
                 // we'll wait only 2us to sync up with both conditions
                 // at the bottom of the if statement
-                asm volatile ("nop\nnop\nnop\nnop\nnop\n"  
-                              "nop\nnop\nnop\nnop\nnop\n"  
-                              "nop\nnop\nnop\nnop\nnop\n"  
-                              "nop\nnop\nnop\nnop\nnop\n"  
-                              "nop\nnop\nnop\nnop\nnop\n"  
-                              "nop\nnop\nnop\nnop\nnop\n"  
+                asm volatile ("nop\nnop\nnop\nnop\nnop\n"
+                              "nop\nnop\nnop\nnop\nnop\n"
+                              "nop\nnop\nnop\nnop\nnop\n"
+                              "nop\nnop\nnop\nnop\nnop\n"
+                              "nop\nnop\nnop\nnop\nnop\n"
+                              "nop\nnop\nnop\nnop\nnop\n"
                               );
-
             } else {
                 asm volatile (";Bit is a 0");
                 // 0 bit
                 // remain low for 3us, then go high for 1us
                 // nop block 3
-                asm volatile ("nop\nnop\nnop\nnop\nnop\n"  
-                              "nop\nnop\nnop\nnop\nnop\n"  
-                              "nop\nnop\nnop\nnop\nnop\n"  
-                              "nop\nnop\nnop\nnop\nnop\n"  
-                              "nop\nnop\nnop\nnop\nnop\n"  
-                              "nop\nnop\nnop\nnop\nnop\n"  
-                              "nop\nnop\nnop\nnop\nnop\n"  
+                asm volatile ("nop\nnop\nnop\nnop\nnop\n"
+                              "nop\nnop\nnop\nnop\nnop\n"
+                              "nop\nnop\nnop\nnop\nnop\n"
+                              "nop\nnop\nnop\nnop\nnop\n"
+                              "nop\nnop\nnop\nnop\nnop\n"
+                              "nop\nnop\nnop\nnop\nnop\n"
+                              "nop\nnop\nnop\nnop\nnop\n"
                               "nop\n");
 
                 asm volatile (";Setting line to high");
@@ -171,7 +180,6 @@ inner_loop:
 
                 // wait for 1us
                 asm volatile ("; end of conditional branch, need to wait 1us more before next bit");
-                
             }
             // end of the if, the line is high and needs to remain
             // high for exactly 16 more cycles, regardless of the previous
@@ -182,7 +190,7 @@ inner_loop:
             if (bits != 0) {
                 // nop block 4
                 // this block is why a for loop was impossible
-                asm volatile ("nop\nnop\nnop\nnop\nnop\n"  
+                asm volatile ("nop\nnop\nnop\nnop\nnop\n"
                               "nop\nnop\nnop\nnop\n");
                 // rotate bits
                 asm volatile (";rotating out bits");
@@ -206,17 +214,17 @@ inner_loop:
     // nop block 5
     asm volatile ("nop\nnop\nnop\nnop\n");
     N64_LOW;
-    // wait 1 us, 16 cycles, then raise the line 
+    // wait 1 us, 16 cycles, then raise the line
     // take another 3 off for the wide_stop check
     // 16-2-3=11
     // nop block 6
     asm volatile ("nop\nnop\nnop\nnop\nnop\n"
-                  "nop\nnop\nnop\nnop\nnop\n"  
+                  "nop\nnop\nnop\nnop\nnop\n"
                   "nop\n");
     if (wide_stop) {
         asm volatile (";another 1us for extra wide stop bit\n"
                       "nop\nnop\nnop\nnop\nnop\n"
-                      "nop\nnop\nnop\nnop\nnop\n"  
+                      "nop\nnop\nnop\nnop\nnop\n"
                       "nop\nnop\nnop\nnop\n");
     }
 
@@ -224,34 +232,75 @@ inner_loop:
 
 }
 
-static void readSerial()
+const char* sendMsg = NULL;
+
+static void readSerial(bool timeout)
 {
   int ms = millis();
   int currentMs = ms;
   digitalWrite(13, HIGH);
-  while (buf->numElements(buf) <= (BUF_COUNT - INPUT_BATCH) && ((currentMs < ms + MS_TIMEOUT) || buf->isEmpty(buf)))
+  if (sendMsg) {
+    writeLine(sendMsg);
+    sendMsg = NULL;
+  }
+  while (buf->numElements(buf) <= (BUF_COUNT - INPUT_BATCH) && (!timeout || ((currentMs < ms + MS_TIMEOUT)) || buf->isEmpty(buf)))
   {
-    while (bit_is_clear(UCSR0A, UDRE0));
-    UDR0 = 0;
-    for (int i = 0; i < INPUT_BATCH; i++) {
-      char localBuf[4];
-      for (int j = 0; j < INPUT_SIZE; j++) {
-        while (!(UCSR0A & (1<<RXC0)));
-        localBuf[j] = UDR0;
+    int cmd;
+    writeByte(REQ_BYTE);
+    while ((cmd = readByteNow()) < 0x80) {
+      if (timeout && !N64_QUERY)
+        goto skip;
+    }
+    if (cmd == START_BYTE) {
+      for (int i = 0; i < INPUT_BATCH && (!timeout || ((currentMs < ms + MS_TIMEOUT) && N64_QUERY)); i++) {
+        char localBuf[INPUT_SIZE + 2] = {0};
+        for (int j = 0; j < INPUT_SIZE + 1; j++) {
+          int byte;
+          while ((byte = readByteNow()) == -1) {
+            if (timeout && !N64_QUERY)
+              goto skip;
+          }
+          localBuf[(j * 7) / 8]       |= byte >> (8 - (j % 7));
+          localBuf[((j * 7) + 7) / 8]  = byte << ((j % 7) + 1);
+        }
+        if ((localBuf[0] ^ localBuf[1] ^ localBuf[2] ^ localBuf[3]) != localBuf[4])
+          sendMsg = "Check failed!";
+        buf->add(buf, localBuf);
+        writeByte(ACK_BYTE);
+        currentMs = millis();
       }
+    } else if (cmd == FINISH_BYTE) {
+      char localBuf[INPUT_SIZE] = {0};
       buf->add(buf, localBuf);
+      finished = true;
+      writeByte(FINISH_BYTE);
+    } else {
+      writeLine("Um wat?");
     }
     currentMs = millis();
   }
+end:
   digitalWrite(13, LOW);
+  return;
+skip:
+  sendMsg = "Timed out on last attempt.";
+  goto end;
 }
 
 void loop()
 {
-    int status;
     unsigned char data, addr;
 
-    readSerial();
+    // wait to make sure the line is idle before
+    // we begin listening
+    for (int idle_wait=32; idle_wait>0; --idle_wait) {
+        if (!N64_QUERY) {
+            idle_wait = 32;
+        }
+    }
+
+    if (!finished)
+      readSerial(true);
 
     // Wait for incomming 64 command
     // this will block until the N64 sends us a command
@@ -280,19 +329,14 @@ void loop()
 
             n64_send(n64_buffer, 3, 0);
 
-            Serial.println("It was 0x00: an identify command");
+            writeLine("Controller identified");
             break;
         case 0x01:
             // blast out the pre-assembled array in n64_buffer
-            if (!buf->pull(buf, command_buffer)) {
-              interrupts();
-              Serial.println("Out of commands!");
-              Serial.flush();
-              noInterrupts();
-            }
+            if (!buf->pull(buf, command_buffer) && !finished)
+              writeLine("Buffer overread!");
             n64_send(command_buffer, 4, 0);
 
-            //Serial.println("It was 0x01: the query command");
             break;
         case 0x02:
             // A read. If the address is 0x8000, return 32 bytes of 0x80 bytes,
@@ -355,8 +399,7 @@ void loop()
             break;
 
         default:
-            //Serial.print(millis(), DEC);
-            //Serial.println(" | Unknown command received!!");
+            writeLine("Unknown command!");
             break;
 
     }
@@ -380,19 +423,10 @@ static void get_n64_command()
 {
     int bitcount;
     char *bitbin = n64_raw_dump;
-    int idle_wait;
 
     n64_command = 0;
 
     bitcount = 8;
-
-    // wait to make sure the line is idle before
-    // we begin listening
-    for (idle_wait=32; idle_wait>0; --idle_wait) {
-        if (!N64_QUERY) {
-            idle_wait = 32;
-        }
-    }
 
 read_loop:
         // wait for the line to go low
@@ -400,12 +434,12 @@ read_loop:
 
         // wait approx 2us and poll the line
         asm volatile (
-                      "nop\nnop\nnop\nnop\nnop\n"  
-                      "nop\nnop\nnop\nnop\nnop\n"  
-                      "nop\nnop\nnop\nnop\nnop\n"  
-                      "nop\nnop\nnop\nnop\nnop\n"  
-                      "nop\nnop\nnop\nnop\nnop\n"  
-                      "nop\nnop\nnop\nnop\nnop\n"  
+                      "nop\nnop\nnop\nnop\nnop\n"
+                      "nop\nnop\nnop\nnop\nnop\n"
+                      "nop\nnop\nnop\nnop\nnop\n"
+                      "nop\nnop\nnop\nnop\nnop\n"
+                      "nop\nnop\nnop\nnop\nnop\n"
+                      "nop\nnop\nnop\nnop\nnop\n"
                 );
         if (N64_QUERY)
             n64_command |= 0x01;
@@ -454,12 +488,12 @@ read_loop2:
 
         // wait approx 2us and poll the line
         asm volatile (
-                      "nop\nnop\nnop\nnop\nnop\n"  
-                      "nop\nnop\nnop\nnop\nnop\n"  
-                      "nop\nnop\nnop\nnop\nnop\n"  
-                      "nop\nnop\nnop\nnop\nnop\n"  
-                      "nop\nnop\nnop\nnop\nnop\n"  
-                      "nop\nnop\nnop\nnop\nnop\n"  
+                      "nop\nnop\nnop\nnop\nnop\n"
+                      "nop\nnop\nnop\nnop\nnop\n"
+                      "nop\nnop\nnop\nnop\nnop\n"
+                      "nop\nnop\nnop\nnop\nnop\n"
+                      "nop\nnop\nnop\nnop\nnop\n"
+                      "nop\nnop\nnop\nnop\nnop\n"
                 );
         *bitbin = N64_QUERY;
         ++bitbin;
