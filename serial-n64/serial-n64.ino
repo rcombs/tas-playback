@@ -61,6 +61,13 @@ void writeString(const char *string)
     writeByte(*string++);
 }
 
+void writeInt(int i, int radix)
+{
+  char localBuf[32];
+  itoa(i, localBuf, radix);
+  writeString(localBuf);
+}
+
 void writeLine(const char *line)
 {
   writeString(line);
@@ -83,7 +90,7 @@ byte readByte()
 
 void setup()
 {
-  Serial.begin(115200);
+  Serial.begin(RATE);
 
   noInterrupts();
 
@@ -233,18 +240,22 @@ inner_loop:
 }
 
 const char* sendMsg = NULL;
+int pendingAcks = 0;
 
 static void readSerial(bool timeout)
 {
   int ms = millis();
   int currentMs = ms;
   digitalWrite(13, HIGH);
-  if (sendMsg) {
-    writeLine(sendMsg);
-    sendMsg = NULL;
-  }
   while (buf->numElements(buf) <= (BUF_COUNT - INPUT_BATCH) && (!timeout || ((currentMs < ms + MS_TIMEOUT)) || buf->isEmpty(buf)))
   {
+    if (sendMsg) {
+      writeLine(sendMsg);
+      sendMsg = NULL;
+    }
+    for (int i = 0; i < pendingAcks; i++)
+      writeByte(ACK_BYTE);
+    pendingAcks = 0;
     int cmd;
     writeByte(REQ_BYTE);
     while ((cmd = readByteNow()) < 0x80) {
@@ -253,20 +264,22 @@ static void readSerial(bool timeout)
     }
     if (cmd == START_BYTE) {
       for (int i = 0; i < INPUT_BATCH && (!timeout || ((currentMs < ms + MS_TIMEOUT) && N64_QUERY)); i++) {
-        char localBuf[INPUT_SIZE + 2] = {0};
-        for (int j = 0; j < INPUT_SIZE + 1; j++) {
+        byte localBuf[INPUT_SIZE + 2] = {0};
+        for (int j = 0; j < (INPUT_SIZE * 8 + 8 + 6) / 7; j++) {
           int byte;
           while ((byte = readByteNow()) == -1) {
             if (timeout && !N64_QUERY)
               goto skip;
           }
-          localBuf[(j * 7) / 8]       |= byte >> (8 - (j % 7));
-          localBuf[((j * 7) + 7) / 8]  = byte << ((j % 7) + 1);
+          localBuf[(j * 7) / 8]      |= byte >> (7 - (j % 7));
+          localBuf[((j * 7) + 7) / 8] = byte << ((j % 7) + 1);
         }
-        if ((localBuf[0] ^ localBuf[1] ^ localBuf[2] ^ localBuf[3]) != localBuf[4])
+        if ((localBuf[0] ^ localBuf[1] ^ localBuf[2] ^ localBuf[3]) != localBuf[4]) {
           sendMsg = "Check failed!";
+          break;
+        }
         buf->add(buf, localBuf);
-        writeByte(ACK_BYTE);
+        pendingAcks++;
         currentMs = millis();
       }
     } else if (cmd == FINISH_BYTE) {
@@ -399,7 +412,9 @@ void loop()
             break;
 
         default:
-            writeLine("Unknown command!");
+            writeString("Unknown command: ");
+            writeInt(n64_command, 16);
+            writeByte('\n');
             break;
 
     }

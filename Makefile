@@ -1,7 +1,7 @@
 CFLAGS += -std=c11 -g
 
 all: serial arduino
-serial: serial.c
+serial: serial.c config.h
 
 .PHONY: arduino upload clean clean-arduino
 

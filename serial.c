@@ -45,11 +45,11 @@ void write_7bit(int fd, const char *in, int len)
   unsigned char check = 0;
   for (int i = 0; i < len; i++) {
     out[(i * 8) / 7]    |=  in[i] >> 1 + (i % 7);
-    out[(i * 8) / 7 + 1] = (in[i] << 7 - (i % 7)) & 0x7F;
+    out[(i * 8) / 7 + 1] = (in[i] << 6 - (i % 7)) & 0x7F;
     check ^= in[i];
   }
   out[(len * 8) / 7]    |=  check >> 1 + (len % 7);
-  out[(len * 8) / 7 + 1] = (check << 7 - (len % 7)) & 0x7F;
+  out[(len * 8) / 7 + 1] = (check << 6 - (len % 7)) & 0x7F;
   write(fd, out, ((len + 1) * 8 + 6) / 7);
 }
 
@@ -75,7 +75,7 @@ int main(int argc, const char** argv)
 
   printf("Total size: %i\n", size);
 
-  speed_t baud = B115200;
+  speed_t baud = BRATE;
 
   struct termios settings;
   tcgetattr(outfd, &settings);
