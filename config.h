@@ -22,8 +22,8 @@
  * OTHER DEALINGS IN THE SOFTWARE.
  */
 
-#define RATE 57600
-#define BRATE B57600
+#define RATE 115200
+#define BRATE B115200
 
 #define HEADER_SIZE 0x400
 

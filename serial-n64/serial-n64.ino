@@ -29,6 +29,9 @@
 #define N64_LOW DDRB |= 0x01
 #define N64_QUERY (PINB & 0x01)
 
+#define LED_HIGH DDRB &= ~0x20
+#define LED_LOW DDRB |= 0x20
+
 static char n64_raw_dump[281]; // maximum recv is 1+2+32 bytes + 1 bit
 // n64_raw_dump does /not/ include the command byte. That gets pushed into
 // n64_command:
@@ -92,7 +95,7 @@ void setup()
 {
   Serial.begin(RATE);
 
-  noInterrupts();
+  UCSR0B &= 0x1F;
 
   writeLine("Starting up");
 
@@ -244,10 +247,9 @@ int pendingAcks = 0;
 
 static void readSerial(bool timeout)
 {
-  int ms = millis();
-  int currentMs = ms;
-  digitalWrite(13, HIGH);
-  while (buf->numElements(buf) <= (BUF_COUNT - INPUT_BATCH) && (!timeout || ((currentMs < ms + MS_TIMEOUT)) || buf->isEmpty(buf)))
+  unsigned long timeoutMs = millis() + MS_TIMEOUT;
+  LED_HIGH;
+  while (buf->numElements(buf) <= (BUF_COUNT - INPUT_BATCH) && (!timeout || millis() < timeoutMs || buf->isEmpty(buf)))
   {
     if (sendMsg) {
       writeLine(sendMsg);
@@ -259,11 +261,13 @@ static void readSerial(bool timeout)
     int cmd;
     writeByte(REQ_BYTE);
     while ((cmd = readByteNow()) < 0x80) {
-      if (timeout && !N64_QUERY)
+      if (timeout && (!N64_QUERY || millis() >= timeoutMs))
         goto skip;
     }
     if (cmd == START_BYTE) {
-      for (int i = 0; i < INPUT_BATCH && (!timeout || ((currentMs < ms + MS_TIMEOUT) && N64_QUERY)); i++) {
+      for (int i = 0; i < INPUT_BATCH; i++) {
+        if (timeout && (!N64_QUERY || millis() >= timeoutMs))
+          goto skip;
         byte localBuf[INPUT_SIZE + 2] = {0};
         for (int j = 0; j < (INPUT_SIZE * 8 + 8 + 6) / 7; j++) {
           int byte;
@@ -280,7 +284,6 @@ static void readSerial(bool timeout)
         }
         buf->add(buf, localBuf);
         pendingAcks++;
-        currentMs = millis();
       }
     } else if (cmd == FINISH_BYTE) {
       char localBuf[INPUT_SIZE] = {0};
@@ -290,10 +293,13 @@ static void readSerial(bool timeout)
     } else {
       writeLine("Um wat?");
     }
-    currentMs = millis();
   }
+
+  if (millis() > timeoutMs)
+    sendMsg = "Timed out by end of last attempt.";
+
 end:
-  digitalWrite(13, LOW);
+  LED_LOW;
   return;
 skip:
   sendMsg = "Timed out on last attempt.";
@@ -312,8 +318,11 @@ void loop()
         }
     }
 
-    if (!finished)
+    if (!finished) {
+      interrupts();
       readSerial(true);
+      noInterrupts();
+    }
 
     // Wait for incomming 64 command
     // this will block until the N64 sends us a command
@@ -362,6 +371,7 @@ void loop()
             n64_buffer[32] = 0xB8; // CRC
 
             n64_send(n64_buffer, 33, 1);
+            writeLine("Got a read, what?");
 
             //Serial.println("It was 0x02: the read command");
             break;
@@ -389,6 +399,7 @@ void loop()
 
             // send it
             n64_send(n64_buffer, 1, 1);
+            writeLine("Got a write, what?");
 
             // end of time critical code
             // was the address the rumble latch at 0xC000?
@@ -412,7 +423,7 @@ void loop()
             break;
 
         default:
-            writeString("Unknown command: ");
+            writeString("Unknown command: 0x");
             writeInt(n64_command, 16);
             writeByte('\n');
             break;
