@@ -44,7 +44,7 @@ static unsigned char n64_buffer[33], command_buffer[33];
 static void get_n64_command();
 static void readSerial(bool timeout);
 
-#include "crc_table.h"
+#include "../crc_table.h"
 
 #include <RingBuf.h>
 
