@@ -21,14 +21,20 @@
  */
 
 #include "pins_arduino.h"
-#include "../crc_table.h"
+#include "crc_table.h"
 #include <SPI.h>
 #include <SD.h>
-
-#define INPUT_FILENAME "1key.m64"
+#include <TFT.h>
+#include <Bounce2.h>
 
 #define SD_SS_PIN 4
 #define STATUS_PIN 13
+#define CS 10
+#define DC 9
+#define RESET 7 // Moved from 8, which is in use by the N64
+
+#define NEXT 2
+#define SELECT 3
 
 #define SERIAL_BAUD_RATE 9600
 
@@ -40,29 +46,29 @@
 #define LED_HIGH DDRB &= ~0x20
 #define LED_LOW DDRB |= 0x20
 
-#define INPUT_BUFFER_SIZE 64 // This is ideal since it allows us to read 256*4/2 = 512 bytes
+#define INPUT_BUFFER_SIZE 16 // This is ideal since it allows us to read 256*4/2 = 512 bytes
 // at once. 512 bytes is an optimization for reading the sd card and skips using another buffer.
 
 #define INPUT_BUFFER_UPDATE_TIMEOUT 10 // 10 ms
 
-static char n64_raw_dump[38]; // maximum recv is 1+2+32 bytes + 1 bit
+static char n64_raw_dump[14]; // maximum recv is 1+2+32 bytes + 1 bit
 // n64_raw_dump does /not/ include the command byte. That gets pushed into
 // n64_command:
 static unsigned char n64_command;
 // bytes to send to the 64
 // maximum we'll need to send is 33, 32 for a read request and 1 CRC byte
-static unsigned char n64_buffer[33];
+static unsigned char n64_buffer[5];
 static void get_n64_command();
 static void n64_send();
 
 // Simple switch buffer. (If buffer A fails to load while buffer B is in use,
 // we still okay, and will try again next loop)
-static unsigned long inputBuffer[INPUT_BUFFER_SIZE];
+static unsigned long *inputBuffer;
 static bool bufferALoaded, bufferBLoaded;
 static bool bufferAInUse, bufferBInUse;
 static int bufferEndPos;
 static bool bufferOneMore;
-static long  bufferPos;
+static long bufferPos;
 static void updateInputBuffer();
 
 static File m64File;
@@ -71,11 +77,82 @@ static bool openM64();
 
 static bool finished = false;
 
+//static unsigned int progressPos = 0;
+static unsigned long numFrames = 0, curFrame = 0;
+
+#define dirPos curFrame
+#define numFiles numFrames
+//static unsigned long &dirPos = curFrame, &numFiles = numFrames;
+
+TFT screen = TFT(CS, DC, RESET);
+
+Bounce next;
+Bounce select;
+
+static void drawLogo(void)
+{
+  PImage logo = screen.loadImage("mario.bmp");
+  if (!logo.isValid()) {
+    screen.println(F("error while loading mario.bmp"));
+  }
+  screen.image(logo, screen.width() - logo.width(), 0);
+  logo.close();
+}
+
+static void clear(void)
+{
+  screen.setCursor(0,0);
+  screen.background(0,0,0);
+  drawLogo();
+}
+
+static bool extMatches(const char *name)
+{
+  int len = strlen(name);
+  if (len < 5)
+    return false;
+
+  return !strcmp_P(name + len - 4, PSTR(".M64"));
+}
+
+static void drawList()
+{
+  screen.setCursor(0,0);
+  File dir = SD.open(F("/"));
+  if (!dir) {
+    screen.println(F("Failed to open root"));
+    return;
+  }
+  dir.rewindDirectory();
+  int pos = 0;
+  for (m64File = dir.openNextFile(); m64File; m64File = dir.openNextFile()) {
+    const char *name = m64File.name();
+    if (!m64File.isDirectory() && extMatches(name)) {
+      if (pos == dirPos) {
+        screen.stroke(0,255,0);
+        strcpy(n64_raw_dump, name);
+      } else {
+        screen.stroke(255,255,255);
+      }
+
+      screen.println(name);
+      pos++;
+    }
+    m64File.close();
+  }
+  dir.close();
+  numFiles = pos;
+  screen.stroke(255,255,255);
+}
+
 void setup()
 {
+  screen.begin();
+  screen.background(0,0,0);
+
   Serial.begin(SERIAL_BAUD_RATE);
   while (!Serial) { ; } // wait for serial port to connect. Needed for native USB port only
-  Serial.println("Starting up");
+  screen.println(F("Starting up"));
 
   // Status LED
   digitalWrite(STATUS_PIN, LOW);
@@ -85,20 +162,18 @@ void setup()
   digitalWrite(N64_PIN, LOW);
   pinMode(N64_PIN, INPUT);
 
+  pinMode(NEXT, INPUT_PULLUP);
+  pinMode(SELECT, INPUT_PULLUP);
+  next.attach(NEXT);
+  select.attach(SELECT);
+
   // Initialize SD card
   if (!SD.begin(SD_SS_PIN)) {
     m64OpenSuccess = false; 
-    Serial.println(F("SD initialization failed!"));
+    screen.println(F("SD initialization failed!"));
     return;
   }
-  Serial.println(F("SD initialization done."));
-
-  // Open m64 file
-  if (!openM64()) {
-    m64OpenSuccess = false; 
-    return;
-  }
-  m64OpenSuccess = true; 
+  screen.println(F("SD initialization done."));
 
   // Setup buffer
   bufferALoaded = false;
@@ -108,19 +183,42 @@ void setup()
   bufferEndPos = -1;
   bufferOneMore = true;
   bufferPos = -1;
-  updateInputBuffer();
 
-  Serial.println(F("Initialization done."));
+  screen.println(F("Initialization done."));
+  
+  clear();
+
+  drawList();
 }
 
-void loop()
+static bool selected = false;
+
+static void selectLoop()
 {
+  next.update();
+  select.update();
+  if (next.fell()) {
+    dirPos++;
+    if (dirPos == numFiles)
+      dirPos = 0;
+    drawList();
+  } else if (select.fell()) {
+    selected = true;
+    openM64();
+    updateInputBuffer();
+  }
+}
+
+ void mainLoop()
+ {
     unsigned char data, addr;
     unsigned long updateTime;
+    unsigned int curPos;
 
     // Loop forever if file open failed
     if (!m64OpenSuccess) {
-        Serial.print(F("Stopping program due to failed file open..."));
+        screen.stroke(255,0,0);
+        screen.print(F("Stopping program due to failed file open..."));
         while (true) { ; }
     }
 
@@ -161,7 +259,7 @@ void loop()
 
             n64_send(n64_buffer, 3, 0);
             interrupts();
-            Serial.println(F("Controller identified"));
+            screen.println(F("Controller identified"));
             break;
         case 0x01:
             // If the TAS is finished, there's nothing left to do.
@@ -185,10 +283,19 @@ void loop()
             // Record if it took longer than expected
             updateTime = micros() - updateTime;
             if (updateTime > INPUT_BUFFER_UPDATE_TIMEOUT * 1000) {
-                Serial.print(F("Input buffer update took to long ("));
-                Serial.print(updateTime / 1000);
-                Serial.println(F(" ms)"));
+                screen.print(F("Input buffer update took to long ("));
+                screen.print(updateTime / 1000);
+                screen.println(F(" ms)"));
             }
+
+            curFrame++;
+            curPos = (curFrame * screen.width()) / numFrames;
+            screen.fill(255,0,0);
+/*            while (progressPos < curPos) {
+              screen.point(progressPos++, screen.height() - 1);
+            }*/
+            screen.fill(255,255,255);
+            
             break;
         case 0x02:
             // A read. If the address is 0x8000, return 32 bytes of 0x80 bytes,
@@ -202,7 +309,7 @@ void loop()
 
             n64_send(n64_buffer, 33, 1);
             interrupts();
-            Serial.println(F("Got a read, what?"));
+            screen.println(F("Got a read, what?"));
 
             //Serial.println("It was 0x02: the read command");
             break;
@@ -231,7 +338,7 @@ void loop()
             // send it
             n64_send(n64_buffer, 1, 1);
             interrupts();
-            Serial.println(F("Got a write, what?"));
+            screen.println(F("Got a write, what?"));
 
             // end of time critical code
             // was the address the rumble latch at 0xC000?
@@ -256,42 +363,61 @@ void loop()
 
         default:
             interrupts();
-            Serial.print(F("Unknown command: 0x"));
-            Serial.println(n64_command, HEX);
+            screen.print(F("Unknown command: 0x"));
+            screen.println(n64_command, HEX);
             break;
     }
+}
+
+
+void loop()
+{
+    if (!selected)
+      return selectLoop();
+    mainLoop();
 }
 
 static bool openM64() {
     char signature[4];
     int version;
+
+    clear();
   
     // Open the file for reading:
-    Serial.println(F("Opening file '" INPUT_FILENAME "'..."));
-    m64File = SD.open(F(INPUT_FILENAME));
+    screen.print(F("Opening file '"));
+    screen.print(n64_raw_dump);
+    screen.println(F("'..."));
+    m64File = SD.open(n64_raw_dump);
+
+    screen.stroke(255,0,0);
   
     // Error check
     if (!m64File) {
-        Serial.println(F("Error in opening file"));
+        screen.println(F("Error in opening file"));
         return false;
     }
   
     // Open header
     if (m64File.read(signature, 4) != 4 || m64File.read(&version, 4) != 4) {
         m64File.close();
+        screen.println(F("Failed to read signature"));
         return false;
     }
   
     // Validate file signature
     if (memcmp(signature, "M64\x1A", 4) != 0) {
-        Serial.println(F("File is not an m64 file or an error occured while reading."));
+        screen.println(F("m64 signature invalid"));
         m64File.close();
         return false;
     }
+    
+    screen.stroke(0,0,255);
   
     // Print version
-    Serial.print(F("M64 Version: "));
-    Serial.println(version);
+    screen.print(F("M64 Version: "));
+    screen.println(version);
+    
+    screen.stroke(255,0,0);
   
     // Get header size
     switch(version) {
@@ -304,19 +430,32 @@ static bool openM64() {
             break;
         default:
           // Unknown version
-            Serial.println(F("Error: uknown M64 version"));
+            screen.println(F("Error: unknown M64 version"));
             m64File.close();
             return false;
     }
   
     // Final check
     if (!m64File.available()) {
-        Serial.println(F("No input data found in file"));
+        screen.println(F("No input data found in file"));
         m64File.close();
         return false;
     }
 
-    Serial.println(F("File opened succesfully"));
+    inputBuffer = malloc(INPUT_BUFFER_SIZE * 4);
+    if (!inputBuffer) {
+      screen.println(F("Failed to allocate input buffer"));
+      m64File.close();
+      return false;
+    }
+
+    screen.stroke(255,255,255);
+
+    screen.println(F("File opened successfully"));
+
+    m64OpenSuccess = true;
+
+    numFrames = (m64File.size() - m64File.position()) / 4;
  
     return true;
 }
@@ -341,7 +480,7 @@ static void updateInputBuffer() {
         if (bufferPos < INPUT_BUFFER_SIZE / 2) {
             // Verify the buffer in use is loaded
             if (!bufferALoaded) {
-                Serial.println(F("Error: New input was not loaded in buffer."));
+                screen.println(F("Error: New input was not loaded in buffer."));
             }
 
             // Clear old buffer when loading
@@ -353,7 +492,7 @@ static void updateInputBuffer() {
             bufferBInUse = false;
         } else {
             if (!bufferBLoaded) {
-                Serial.println(F("Error: New input was not loaded in buffer."));
+                screen.println(F("Error: New input was not loaded in buffer."));
             }
 
             // Clear old buffer when loading
@@ -370,7 +509,7 @@ static void updateInputBuffer() {
     if (bufferEndPos != -1) {
         // Perform one more input then end once the last input data has been queued.
         if (!bufferOneMore) {
-            Serial.println(F("TAS finished playing"));
+            screen.println(F("TAS finished playing"));
             finished = true;
         }
         else if (bufferPos == bufferEndPos) 
@@ -381,7 +520,7 @@ static void updateInputBuffer() {
   
     // Check for file end
     if (!m64File.available()) {
-        Serial.println(F("End of M64 loaded into buffer"));
+//        screen.println(F("End of M64 loaded into buffer"));
         
         // Set end
         if (!bufferAInUse) {
@@ -393,7 +532,7 @@ static void updateInputBuffer() {
             bufferEndPos = INPUT_BUFFER_SIZE/2 - 1;
         } else {
             // Da fuq? (This should never happen)
-            Serial.println(F("Unexpected ending of input file"));
+            screen.println(F("Unexpected ending of input file"));
       
             // End immediatley
             bufferEndPos = 0;
@@ -411,12 +550,12 @@ static void updateInputBuffer() {
         // Read bytes
         readBytes = m64File.read(inputBuffer, INPUT_BUFFER_SIZE*2);
         if (readBytes == 0) {
-            Serial.println(F("Failed to read next inputs from file. (This is recoverable)"));
+            screen.println(F("Failed to read next inputs from file. (This is recoverable)"));
         }
         else {
             bufferALoaded = true;
             if (readBytes != INPUT_BUFFER_SIZE*2) {
-                Serial.println(F("End of M64 file found. Loading remaining bytes."));
+//                screen.println(F("End of M64 file found. Loading remaining bytes."));
                 bufferEndPos = readBytes / 4 - 1;
                 // Close file
                 m64File.close();
@@ -429,12 +568,12 @@ static void updateInputBuffer() {
         // Read bytes
         readBytes = m64File.read(inputBuffer + (INPUT_BUFFER_SIZE / 2), INPUT_BUFFER_SIZE*2);
         if (readBytes == 0) {
-            Serial.println(F("Failed to read next inputs from file. (This is recoverable)"));
+            screen.println(F("Failed to read next inputs from file. (This is recoverable)"));
         }
         else {
             bufferBLoaded = true;
             if (readBytes != INPUT_BUFFER_SIZE*2) {
-                Serial.println(F("End of M64 file found. Loading remaining bytes."));
+//                screen.println(F("End of M64 file found. Loading remaining bytes."));
                 // buffer end is offset from middle
                 bufferEndPos = INPUT_BUFFER_SIZE / 2 + readBytes / 4 - 1;
                 // Close file
