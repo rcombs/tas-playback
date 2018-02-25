@@ -36,7 +36,7 @@
 #define NEXT 2
 #define SELECT 3
 
-#define SERIAL_BAUD_RATE 9600
+#define SERIAL_BAUD_RATE 115200
 
 #define N64_PIN 8
 #define N64_HIGH DDRB &= ~0x01
@@ -127,7 +127,7 @@ static void drawList()
   int pos = 0;
   for (m64File = dir.openNextFile(); m64File; m64File = dir.openNextFile()) {
     const char *name = m64File.name();
-    if (!m64File.isDirectory() && extMatches(name)) {
+    if (!m64File.isDirectory() && extMatches(name) && name[0] != '_') {
       if (pos == dirPos) {
         screen.stroke(0,255,0);
         strcpy(n64_raw_dump, name);
@@ -209,11 +209,26 @@ static void selectLoop()
   }
 }
 
- void mainLoop()
- {
+void logFrame()
+{
+  const unsigned char *dat = (const unsigned char*)(inputBuffer + bufferPos);
+  Serial.write("F:");
+  Serial.print(curFrame + 1);
+  Serial.write(" ");
+  Serial.print(dat[0], HEX);
+  Serial.write(" ");
+  Serial.print(dat[1], HEX);
+  Serial.write(" ");
+  Serial.print(dat[2], HEX);
+  Serial.write(" ");
+  Serial.println(dat[3], HEX);
+}
+
+void mainLoop()
+{
     unsigned char data, addr;
     unsigned long updateTime;
-    unsigned int curPos;
+//    unsigned int curPos;
 
     // Loop forever if file open failed
     if (!m64OpenSuccess) {
@@ -260,15 +275,23 @@ static void selectLoop()
             n64_send(n64_buffer, 3, 0);
             interrupts();
             screen.println(F("Controller identified"));
+            Serial.println("P:");
             break;
         case 0x01:
             // If the TAS is finished, there's nothing left to do.
-            if (finished)
-                break;
+            if (finished && !bufferOneMore)
+              *(long*)n64_buffer = 0;
+            else
+              *(long*)n64_buffer = *(inputBuffer + bufferPos);
         
             // blast out the pre-assembled array in n64_buffer
-            n64_send((byte *) (inputBuffer + bufferPos), 4, 0);
+            n64_send(n64_buffer, 4, 0);
             interrupts();
+
+            if (finished)
+              break;
+
+            logFrame();
 
             // update input buffer and make sure it doesn't take too long
             updateTime = micros();
@@ -283,19 +306,28 @@ static void selectLoop()
             // Record if it took longer than expected
             updateTime = micros() - updateTime;
             if (updateTime > INPUT_BUFFER_UPDATE_TIMEOUT * 1000) {
-                screen.print(F("Input buffer update took to long ("));
+                screen.print(F("Input buffer update took too long ("));
                 screen.print(updateTime / 1000);
                 screen.println(F(" ms)"));
             }
 
             curFrame++;
-            curPos = (curFrame * screen.width()) / numFrames;
+
+            if (curFrame == numFrames && !finished && 0) {
+              screen.println(F("TAS finished playing"));
+              Serial.println("C:");
+              finished = true;
+              Serial.flush();
+            }
+
+/*            if (!finished)
+              curPos = (curFrame * screen.width()) / numFrames;
             screen.fill(255,0,0);
-/*            while (progressPos < curPos) {
+            while (progressPos < curPos) {
               screen.point(progressPos++, screen.height() - 1);
-            }*/
-            screen.fill(255,255,255);
-            
+            }
+            screen.fill(255,255,255);*/
+
             break;
         case 0x02:
             // A read. If the address is 0x8000, return 32 bytes of 0x80 bytes,
@@ -382,6 +414,9 @@ static bool openM64() {
     int version;
 
     clear();
+
+    Serial.write("M:");
+    Serial.println(n64_raw_dump);
   
     // Open the file for reading:
     screen.print(F("Opening file '"));
@@ -418,6 +453,15 @@ static bool openM64() {
     screen.println(version);
     
     screen.stroke(255,0,0);
+
+    m64File.seek(0x018);
+  
+    // Open header
+    if (m64File.read(&numFrames, 4) != 4) {
+        m64File.close();
+        screen.println(F("Failed to read frame count"));
+        return false;
+    }
   
     // Get header size
     switch(version) {
@@ -455,7 +499,10 @@ static bool openM64() {
 
     m64OpenSuccess = true;
 
-    numFrames = (m64File.size() - m64File.position()) / 4;
+    numFrames = min(numFrames, (m64File.size() - m64File.position()) / 4);
+
+    Serial.write("N:");
+    Serial.println(numFrames);
  
     return true;
 }
@@ -509,7 +556,8 @@ static void updateInputBuffer() {
     if (bufferEndPos != -1) {
         // Perform one more input then end once the last input data has been queued.
         if (!bufferOneMore) {
-            screen.println(F("TAS finished playing"));
+            screen.println(F("TAS finished playing2"));
+            Serial.println("C:");
             finished = true;
         }
         else if (bufferPos == bufferEndPos) 
