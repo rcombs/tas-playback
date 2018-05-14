@@ -58,7 +58,7 @@
 static char n64_raw_dump[36]; // maximum recv is 1+2+32 bytes + 1 bit
 // n64_raw_dump does not include the command byte. That gets pushed into
 // n64_command:
-static unsigned char n64_command;
+static int n64_command;
 // bytes to send to the 64
 // maximum we'll need to send is 33, 32 for a read request and 1 CRC byte
 static unsigned char n64_buffer[33];
@@ -166,9 +166,51 @@ void logFrame()
   Serial.println(dat[3], HEX);
 }
 
+static bool setPinMode(const String& cmd)
+{
+  if (cmd.length() < 3)
+    return false;
+  if (cmd[1] != ':')
+    return false;
+
+  int pinNumber = cmd.substring(2).toInt();
+
+  if (cmd[0] == 'I')
+    pinMode(pinNumber, INPUT);
+  else if (cmd[0] == 'O')
+    pinMode(pinNumber, OUTPUT);
+  else if (cmd[0] == 'U')
+    pinMode(pinNumber, INPUT_PULLUP);
+  else if (cmd[0] == 'D')
+    pinMode(pinNumber, INPUT_PULLDOWN);
+  else
+    return false;
+
+  return true;
+}
+
+static bool writePin(const String& cmd)
+{
+  if (cmd.length() < 3)
+    return false;
+  if (cmd[1] != ':')
+    return false;
+
+  int pinNumber = cmd.substring(2).toInt();
+
+  if (cmd[0] == '0')
+    digitalWrite(pinNumber, LOW);
+  else if (cmd[0] == '1')
+    digitalWrite(pinNumber, HIGH);
+  else
+    return false;
+
+  return true;
+}
+
 static FatFile writeFile;
 
-const bool skippingInput = false;
+bool skippingInput = false;
 static String inputString;
 
 static void handleCommand(const String& cmd)
@@ -195,9 +237,13 @@ static void handleCommand(const String& cmd)
 
   } else if (cmd.startsWith("CL:")) {
     writeFile.close();
+  } else if (cmd.startsWith("PM:")) {
+    setPinMode(cmd.substring(3));
+  } else if (cmd.startsWith("DW:")) {
+    writePin(cmd.substring(3));
   } else {
     Serial.print("Unknown CMD:");
-    Serial.println(cmd);
+    Serial.println(cmd.c_str());
   }
 }
 
@@ -210,15 +256,28 @@ static void inputLoop()
       if (skippingInput)
         Serial.println("Skipped line longer than 256 chars");
       else
-        handleCommand();
+        handleCommand(inputString);
       inputString = "";
       skippingInput = false;
     } else if (inputString.length() > 256) {
       skippingInput = true;
     } else {
-      inputString += newChar;
+      inputString += (char)newChar;
     }
   }
+}
+
+static void waitForIdle(int us)
+{
+  LED_HIGH;
+  N64_HIGH;
+  startTimer();
+  int lastReset = 0;
+  while (readTimer() - lastReset < us * MICRO_CYCLES && readTimer() < us * MICRO_CYCLES * 4) {
+    if (!N64_QUERY)
+      lastReset = readTimer();
+  }
+  LED_LOW;
 }
 
 static void mainLoop()
@@ -246,9 +305,6 @@ static void n64Interrupt()
     // Bail if file open failed
     if (!m64OpenSuccess)
         return;
-
-    // wait to make sure the line is idle before
-    // we begin listening
 
     noInterrupts();
 
@@ -314,7 +370,7 @@ static void n64Interrupt()
             curFrame++;
 
             pos = bufferPos + 1;
-            if (pos >= INPUT_BUFFER_SIZE) 
+            if (pos >= INPUT_BUFFER_SIZE)
                 pos = 0;
             bufferPos = pos;
 
@@ -389,6 +445,11 @@ static void n64Interrupt()
             //Serial.print(addr, HEX);
             //Serial.print(" and data was 0x");
             //Serial.println(data, HEX);
+            break;
+
+        case -1:
+            Serial.println(F("Timed out reading N64 command"));
+            waitForIdle(1000);
             break;
 
         default:
@@ -503,11 +564,12 @@ static bool openM64(const String& path) {
     Serial.flush();
 
     // Wait for the line to go idle, then begin listening
+    /*
     for (int idle_wait=32; idle_wait>0; --idle_wait) {
         if (!N64_QUERY) {
             idle_wait = 32;
         }
-    }
+    }*/
 
     noInterrupts();
     m64OpenSuccess = true;
@@ -522,7 +584,7 @@ static bool openM64(const String& path) {
 
 
 static void updateInputBuffer() {
-    if (finished)
+    if (finished || !m64OpenSuccess)
       return;
   
     long readBytes = 0;
@@ -655,28 +717,29 @@ static long readTimer()
  */
 static void n64_send(unsigned char *buffer, char length, bool wide_stop)
 {
-    long target;
-    LED_HIGH;
-    N64_LOW;
-    startTimer();
- 
-    for (int i = 0; i < length * 8; i++) {
-      char bit = (buffer[i >> 3] >> (7 - (i & 7))) & 1;
-      target = MICRO_CYCLES * (3 - bit * 2);
-      while (readTimer() < target);
-      N64_HIGH;
-      while (readTimer() < MICRO_CYCLES * 4);
-      N64_LOW;
-      startTimer();
-    }
+  long target;
+  LED_HIGH;
+  N64_LOW;
+  startTimer();
 
-    target = MICRO_CYCLES * (1 + wide_stop);
-
+  for (int i = 0; i < length * 8; i++) {
+    char bit = (buffer[i >> 3] >> (7 - (i & 7))) & 1;
+    target = MICRO_CYCLES * (3 - bit * 2);
     while (readTimer() < target);
+      N64_HIGH;
+    while (readTimer() < MICRO_CYCLES * 4);
+      N64_LOW;
+    startTimer();
+  }
 
-    N64_HIGH;
-    LED_LOW;
-    while (!N64_QUERY);
+  target = MICRO_CYCLES * (1 + wide_stop);
+
+  while (readTimer() < target);
+
+  N64_HIGH;
+  startTimer();
+  while (!N64_QUERY && readTimer() < MICRO_CYCLES * 4);
+  LED_LOW;
 }
 
 /**
@@ -701,11 +764,20 @@ static void get_n64_command()
 
     LED_HIGH;
 
+#define FAIL_TIMEOUT {\
+  if (readTimer() >= MICRO_CYCLES * 10) {\
+    n64_command = -1; \
+    goto fail; \
+  } \
+}\
+
     for (int i = 1; i <= bitcount; i++) {
-        while (!N64_QUERY);
+        while (!N64_QUERY)
+          FAIL_TIMEOUT;
         long lowTime = readTimer();
         startTimer();
-        while (N64_QUERY);
+        while (N64_QUERY)
+          FAIL_TIMEOUT;
         long highTime = readTimer();
         startTimer();
         char bit = (lowTime < highTime);
@@ -739,9 +811,12 @@ static void get_n64_command()
     }
 
     // Wait for the stop bit
-    while (!N64_QUERY);
+    while (!N64_QUERY)
+      FAIL_TIMEOUT;
     startTimer();
     while (readTimer() < MICRO_CYCLES * 2);
+
+fail:
 
     LED_LOW;
 }
