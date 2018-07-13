@@ -29,15 +29,9 @@
 #include <SdFat.h>
 #include <BlockDriver.h>
 #include <SysCall.h>
+#include <DMAChannel.h>
 
-#define SD_SS_PIN 4
 #define STATUS_PIN 13
-#define CS 10
-#define DC 9
-#define RESET 7 // Moved from 8, which is in use by the N64
-
-#define NEXT 2
-#define SELECT 3
 
 #define SERIAL_BAUD_RATE 115200
 
@@ -50,10 +44,25 @@
 #define LED_HIGH (CORE_PIN13_PORTSET = CORE_PIN13_BITMASK) //digitalWriteFast(STATUS_PIN, HIGH)
 #define LED_LOW (CORE_PIN13_PORTCLEAR = CORE_PIN13_BITMASK) //digitalWriteFast(STATUS_PIN, LOW)
 
-#define INPUT_BUFFER_SIZE 512 // This is ideal since it allows us to read 256*4/2 = 512 bytes
-// at once. 512 bytes is an optimization for reading the sd card and skips using another buffer.
+#define INPUT_BUFFER_SIZE 2048 // Multiples of 512 are ideal since we can read 256*4/2 = 512 bytes at once.
+// 512 bytes is an optimization for reading the sd card and skips using another buffer.
 
 #define INPUT_BUFFER_UPDATE_TIMEOUT 10 // 10 ms
+
+template<class T> void lockedPrintln(const T& input)
+{
+  noInterrupts();
+  Serial.println(input);
+  interrupts();
+}
+
+template<class A, class B> void lockedPrintln(const A& a, const B& b)
+{
+  noInterrupts();
+  Serial.print(a);
+  Serial.println(b);
+  interrupts();
+}
 
 static char n64_raw_dump[36]; // maximum recv is 1+2+32 bytes + 1 bit
 // n64_raw_dump does not include the command byte. That gets pushed into
@@ -61,20 +70,67 @@ static char n64_raw_dump[36]; // maximum recv is 1+2+32 bytes + 1 bit
 static int n64_command;
 // bytes to send to the 64
 // maximum we'll need to send is 33, 32 for a read request and 1 CRC byte
-static unsigned char n64_buffer[33];
+static unsigned char output_buffer[33];
 static void get_n64_command();
 static void n64_send(unsigned char *buffer, char length, bool wide_stop);
 
 // Simple switch buffer. (If buffer A fails to load while buffer B is in use,
 // we still okay, and will try again next loop)
-static unsigned long inputBuffer[INPUT_BUFFER_SIZE];
-static bool bufferALoaded, bufferBLoaded;
-static bool bufferAInUse, bufferBInUse;
-static long bufferEndPos;
-static bool bufferOneMore;
-static long bufferPos;
+static char inputBuffer[INPUT_BUFFER_SIZE];
+static size_t bufferEndPos;
+static volatile size_t bufferPos;
+static volatile bool bufferHasData;
 static void updateInputBuffer();
 
+static size_t getNextRegion(size_t& size) {
+  size_t currentPos = bufferPos;
+  if ((currentPos == bufferEndPos || (currentPos == 0 && bufferEndPos == INPUT_BUFFER_SIZE)) && bufferHasData) {
+    size = 0;
+    return 0;
+  }
+  size_t ret = bufferEndPos;
+  if (ret == INPUT_BUFFER_SIZE)
+    ret = 0;
+  size = INPUT_BUFFER_SIZE - ret;
+  if (ret < currentPos)
+    size = currentPos - ret;
+  return ret;
+}
+
+void initBuffers()
+{
+  bufferEndPos = 0;
+  bufferPos = 0;
+  bufferHasData = false;
+}
+
+static void advanceBuffer(long bytes)
+{
+  size_t pos = bufferPos + bytes;
+  if (pos == bufferEndPos) {
+    bufferHasData = false;
+    bufferPos = pos;
+    return;
+  }
+  if (pos >= INPUT_BUFFER_SIZE)
+      pos = 0;
+  bufferPos = pos;
+}
+
+static size_t appendInputs(const String& data)
+{
+  size_t totalWritten = 0;
+  size_t writeLen = 0;
+  do {
+    size_t dataLeft = data.length() - totalWritten;
+    size_t writePos = getNextRegion(writeLen);
+    if (writeLen > dataLeft)
+      writeLen = dataLeft;
+    memcpy(inputBuffer + writePos, data.c_str() + totalWritten, writeLen);
+    totalWritten += writeLen;
+  } while (writeLen > 0);
+  return totalWritten;
+}
 
 static FatFile m64File;
 static bool m64OpenSuccess = false;
@@ -84,11 +140,10 @@ static bool finished = false;
 
 //static unsigned int progressPos = 0;
 static unsigned long numFrames = 0, curFrame = 0;
+static int edgesRead = 0;
+static int incompleteCommand = 0;
 
 SdFatSdioEX sd;
-
-#define dirPos curFrame
-#define numFiles numFrames
 
 #define MICRO_CYCLES (F_CPU / 1000000)
 
@@ -96,15 +151,14 @@ static void emitList(const String& path)
 {
   FatFile dir;
   if (!dir.open(&sd, path.c_str(), O_READ)) {
-    Serial.println(F("Failed to open requested directory"));
+    Serial.println(F("E:Failed to open requested directory"));
     return;
   }
   dir.rewind();
   while (m64File.openNext(&dir)) {
     char name[256];
     m64File.getName(name, sizeof(name));
-    Serial.print("A:");
-    Serial.println(name);
+    lockedPrintln("A:", name);
     m64File.close();
   }
   dir.close();
@@ -134,21 +188,15 @@ void setup()
   // Initialize SD card
   if (!sd.begin()) {
     m64OpenSuccess = false; 
-    Serial.println(F("SD initialization failed!"));
+    Serial.println(F("E:SD initialization failed!"));
     return;
   }
-  Serial.println(F("SD initialization done."));
+  Serial.println(F("L:SD initialization done."));
 
   // Setup buffer
-  bufferALoaded = false;
-  bufferBLoaded = false;
-  bufferAInUse = false;
-  bufferBInUse = false;
-  bufferEndPos = -1;
-  bufferOneMore = true;
-  bufferPos = -1;
+  initBuffers();
 
-  Serial.println(F("Initialization done."));
+  Serial.println(F("L:Initialization done."));
 }
 
 void logFrame()
@@ -208,7 +256,36 @@ static bool writePin(const String& cmd)
   return true;
 }
 
+String hextobin(const String& hex)
+{
+  String ret;
+  ret.reserve((hex.length() + 1) / 2);
+
+  // mapping of ASCII characters to hex values
+  static const uint8_t map[] = {
+    0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, // 01234567
+    0x08, 0x09, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 89:;<=>?
+    0x00, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x00, // @ABCDEFG
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // HIJKLMNO
+  };
+
+  for (size_t pos = 0; pos < hex.length(); pos += 2) {
+    size_t idx0 = ((uint8_t)hex[pos]     & 0x1F) ^ 0x10,
+           idx1 = ((uint8_t)hex[pos + 1] & 0x1F) ^ 0x10;
+    ret += (char)((map[idx0] << 4) | map[idx1]);
+  }
+
+  return ret;
+}
+
 static FatFile writeFile;
+
+static void appendData(const String& data) {
+  if (writeFile.write(data.c_str(), data.length()) == (int)data.length())
+    Serial.println("AP:OK");
+  else
+    Serial.println("AP:NAK");
+}
 
 bool skippingInput = false;
 static String inputString;
@@ -222,44 +299,49 @@ static void handleCommand(const String& cmd)
   } else if (cmd.startsWith("L:")) {
     emitList(cmd.substring(2));
   } else if (cmd.startsWith("MK:")) {
-    Serial.print("MK:");
-    Serial.println(sd.mkdir(cmd.substring(3).c_str()));
+    lockedPrintln("MK:", sd.mkdir(cmd.substring(3).c_str()));
   } else if (cmd.startsWith("CR:")) {
     if (writeFile.isOpen()) {
       writeFile.close();
     }
-    if (writeFile.open(&sd, cmd.substring(3).c_str(), O_WRITE | O_CREAT)) {
-      Serial.println("CR:OK");
+    if (writeFile.open(&sd, cmd.substring(3).c_str(), O_WRITE | O_CREAT | O_TRUNC)) {
+      lockedPrintln("CR:OK");
     } else {
-      Serial.println("CR:NAK");
+      lockedPrintln("CR:NAK");
     }
   } else if (cmd.startsWith("AP:")) {
-
+    appendData(hextobin(cmd.substring(3)));
+  } else if (cmd.startsWith("IN:")) {
+    size_t len = appendInputs(hextobin(cmd.substring(3)));
+    lockedPrintln("IN:", len);
   } else if (cmd.startsWith("CL:")) {
     writeFile.close();
+    lockedPrintln("CL:OK");
   } else if (cmd.startsWith("PM:")) {
     setPinMode(cmd.substring(3));
   } else if (cmd.startsWith("DW:")) {
     writePin(cmd.substring(3));
   } else {
-    Serial.print("Unknown CMD:");
-    Serial.println(cmd.c_str());
+    lockedPrintln("E:Unknown CMD:", cmd.c_str());
   }
 }
+
+#define MAX_CMD_LEN 4096
+#define MAX_LOOP_LEN 10240
 
 static void inputLoop()
 {
   int newChar;
   int charsRead = 0;
-  while ((newChar = Serial.read()) != -1 && (charsRead++ <= 1024)) {
+  while ((newChar = Serial.read()) != -1 && (charsRead++ <= MAX_LOOP_LEN)) {
     if (newChar == '\n') {
       if (skippingInput)
-        Serial.println("Skipped line longer than 256 chars");
+        Serial.println("E:Skipped too-long line");
       else
         handleCommand(inputString);
       inputString = "";
       skippingInput = false;
-    } else if (inputString.length() > 256) {
+    } else if (inputString.length() > MAX_CMD_LEN) {
       skippingInput = true;
     } else {
       inputString += (char)newChar;
@@ -295,8 +377,10 @@ static void mainLoop()
 
 static void n64Interrupt()
 {
-    long pos;
+    noInterrupts();
+
     unsigned char data, addr;
+    int ticksSinceLast = readTimer();
     startTimer();
     volatile uint32_t *config = portConfigRegister(N64_PIN);
     uint32_t oldConfig = *config;
@@ -304,9 +388,7 @@ static void n64Interrupt()
 
     // Bail if file open failed
     if (!m64OpenSuccess)
-        return;
-
-    noInterrupts();
+        goto end;
 
     *config &= ~0x000F0000;
 
@@ -323,7 +405,7 @@ static void n64Interrupt()
         case 0x00:
         case 0xFF:
             // identify
-            // mutilate the n64_buffer array with our status
+            // mutilate the output_buffer array with our status
             // we return 0x050001 to indicate we have a rumble pack
             // or 0x050002 to indicate the expansion slot is empty
             //
@@ -331,26 +413,26 @@ static void n64Interrupt()
             // I don't know why it's different, but the controllers seem to
             // send a set of status bytes afterwards the same as 0x00, and
             // it won't work without it.
-            n64_buffer[0] = 0x05;
-            n64_buffer[1] = 0x00;
-            n64_buffer[2] = 0x01;
+            output_buffer[0] = 0x05;
+            output_buffer[1] = 0x00;
+            output_buffer[2] = 0x01;
 
-            n64_send(n64_buffer, 3, 1);
-            Serial.println(F("Controller identified"));
+            n64_send(output_buffer, 3, 1);
             Serial.println("P:");
             break;
         case 0x01:
             // If the TAS is finished, there's nothing left to do.
-            if (finished && !bufferOneMore)
-              memset(n64_buffer, 0, 4);
+            if (finished || !bufferHasData)
+              memset(output_buffer, 0, 4);
             else
-              memcpy(n64_buffer, inputBuffer + bufferPos, 4);
+              memcpy(output_buffer, inputBuffer + bufferPos, 4);
         
-            // blast out the pre-assembled array in n64_buffer
-            n64_send(n64_buffer, 4, 1);
+            // blast out the pre-assembled array in output_buffer
+            n64_send(output_buffer, 4, 1);
 
-            if (finished)
+            if (finished) {
               break;
+            }
 
             logFrame();
 
@@ -362,17 +444,14 @@ static void n64Interrupt()
             Serial.println(inputBuffer[bufferPos]);*/
             
             if (curFrame == numFrames && !finished) {
-              Serial.println(F("TAS finished playing"));
               Serial.println("C:");
               finished = true;
             }
 
             curFrame++;
 
-            pos = bufferPos + 1;
-            if (pos >= INPUT_BUFFER_SIZE)
-                pos = 0;
-            bufferPos = pos;
+            if (!finished && bufferHasData)
+              advanceBuffer(4);
 
 //            while (Serial.availableForWrite() && readTimer() < 10 * 1000 * MICRO_CYCLES && N64_QUERY);
 
@@ -392,11 +471,11 @@ static void n64Interrupt()
 
             // Assume it's a read for 0x8000, which is the only thing it should
             // be requesting anyways
-            memset(n64_buffer, 0x80, 32);
-            n64_buffer[32] = 0xB8; // CRC
+            memset(output_buffer, 0x80, 32);
+            output_buffer[32] = 0xB8; // CRC
 
-            n64_send(n64_buffer, 33, 1);
-            Serial.println(F("Got a read, what?"));
+            n64_send(output_buffer, 33, 1);
+            Serial.println(F("L:Got a read, what?"));
 
             //Serial.println("It was 0x02: the read command");
             break;
@@ -420,11 +499,11 @@ static void n64Interrupt()
 
             // get crc byte, invert it, as per the protocol for
             // having a memory card attached
-            n64_buffer[0] = crc_repeating_table[data] ^ 0xFF;
+            output_buffer[0] = crc_repeating_table[data] ^ 0xFF;
 
             // send it
-            n64_send(n64_buffer, 1, 1);
-            Serial.println(F("Got a write, what?"));
+            n64_send(output_buffer, 1, 1);
+            Serial.println(F("L:Got a write, what?"));
 
             // end of time critical code
             // was the address the rumble latch at 0xC000?
@@ -448,16 +527,35 @@ static void n64Interrupt()
             break;
 
         case -1:
-            Serial.println(F("Timed out reading N64 command"));
+            if (finished)
+              break;
+            Serial.print(F("W:Read timeout; "));
+            Serial.print(edgesRead);
+            Serial.println(F(" edges read"));
+            if (edgesRead >= 2) {
+              Serial.print(F("W: partial byte: "));
+              Serial.println(incompleteCommand, HEX);
+            }
+            Serial.print(F("W:"));
+            Serial.print(ticksSinceLast);
+            Serial.println(F(" cycles since last"));
+            if (curFrame > 100)
+              Serial.println(F("D:timeout"));
             waitForIdle(1000);
             break;
 
         default:
-            Serial.print(F("Unknown command: 0x"));
+            if (finished)
+              break;
+            Serial.print(F("W:Unknown command: 0x"));
             Serial.println(n64_command, HEX);
+            if (curFrame > 100)
+              Serial.println(F("D:inval"));
+            waitForIdle(1000);
             break;
     }
 
+end:
     *config = oldConfig;
 
     interrupts();
@@ -478,7 +576,7 @@ static bool openM64(const String& path) {
     Serial.println(path);
   
     // Open the file for reading:
-    Serial.print(F("Opening file '"));
+    Serial.print(F("L:Opening file '"));
     Serial.print(path);
     Serial.println(F("'..."));
 
@@ -489,26 +587,26 @@ static bool openM64(const String& path) {
   
     // Error check
     if (!m64File.open(&sd, path.c_str(), O_READ)) {
-        Serial.println(F("Error in opening file"));
+        Serial.println(F("E:Error in opening file"));
         return false;
     }
   
     // Open header
     if (m64File.read(signature, 4) != 4 || m64File.read(&version, 4) != 4) {
         m64File.close();
-        Serial.println(F("Failed to read signature"));
+        Serial.println(F("E:Failed to read signature"));
         return false;
     }
   
     // Validate file signature
     if (memcmp(signature, "M64\x1A", 4) != 0) {
-        Serial.println(F("m64 signature invalid"));
+        Serial.println(F("E:m64 signature invalid"));
         m64File.close();
         return false;
     }
       
     // Print version
-    Serial.print(F("M64 Version: "));
+    Serial.print(F("L:M64 Version: "));
     Serial.println(version);
 
     Serial.flush();
@@ -516,9 +614,10 @@ static bool openM64(const String& path) {
     m64File.seekSet(0x018);
   
     // Open header
-    if (m64File.read(&numFrames, 4) != 4) {
+    int32_t newNumFrames;
+    if (m64File.read(&newNumFrames, 4) != 4) {
         m64File.close();
-        Serial.println(F("Failed to read frame count"));
+        Serial.println(F("E:Failed to read frame count"));
         return false;
     }
   
@@ -533,33 +632,22 @@ static bool openM64(const String& path) {
             break;
         default:
           // Unknown version
-            Serial.println(F("Error: unknown M64 version"));
+            Serial.println(F("E:unknown M64 version"));
             m64File.close();
             return false;
     }
   
     // Final check
     if (!m64File.available()) {
-        Serial.println(F("No input data found in file"));
+        Serial.println(F("E:No input data found in file"));
         m64File.close();
         return false;
     }
 
-    Serial.println(F("File opened successfully"));
-
-    Serial.print(F("Total size: "));
-    Serial.println(m64File.fileSize());
-    
-    Serial.print(F("Position: "));
-    Serial.println(m64File.curPosition());
-    
-    Serial.print(F("Expected Frames: "));
-    Serial.println((m64File.fileSize() - m64File.curPosition()) / 4);
-
-    numFrames = min(numFrames, (m64File.fileSize() - m64File.curPosition()) / 4);
+    newNumFrames = min(newNumFrames, (m64File.fileSize() - m64File.curPosition()) / 4);
 
     Serial.write("N:");
-    Serial.println(numFrames);
+    Serial.println(newNumFrames);
 
     Serial.flush();
 
@@ -574,131 +662,41 @@ static bool openM64(const String& path) {
     noInterrupts();
     m64OpenSuccess = true;
     finished = false;
-    bufferPos = -1;
-    bufferALoaded = false;
-    bufferBLoaded = false;
+    initBuffers();
+    curFrame = 0;
+    numFrames = newNumFrames;
     interrupts();
  
     return true;
 }
 
-
 static void updateInputBuffer() {
-    if (finished || !m64OpenSuccess)
+    if (finished || !m64File.isOpen())
       return;
-  
-    long readBytes = 0;
-    if (bufferPos == -1) {
-        // Initially, both of our buffers are not in use
-        bufferPos = 0;
-        bufferAInUse = false;
-        bufferBInUse = false;
-    }
-    else {
-        // Calculate next buffer position
-        // Wrap position
-
-        // Calculate which buffer (A or B) is in use
-        if (bufferPos < INPUT_BUFFER_SIZE / 2) {
-            // Verify the buffer in use is loaded
-            if (!bufferALoaded) {
-                Serial.println(F("Error: New input was not loaded in buffer."));
-            }
-
-            // Clear old buffer when loading
-            if (!bufferAInUse) {
-                bufferBLoaded = false;
-            }
-            
-            bufferAInUse = true;
-            bufferBInUse = false;
-        } else {
-            if (!bufferBLoaded) {
-                Serial.println(F("Error: New input was not loaded in buffer."));
-            }
-
-            // Clear old buffer when loading
-            if (!bufferBInUse) {
-                bufferALoaded = false;
-            }
-            
-            bufferAInUse = false;
-            bufferBInUse = true;
-        }
-    }
-    
-    // If we have loaded all inputs, wrap up
-    if (bufferEndPos != -1) {
-        // Perform one more input then end once the last input data has been queued.
-        if (bufferOneMore && bufferPos == bufferEndPos) 
-            bufferOneMore = false;
-            
-        return;
-    }
   
     // Check for file end
     if (!m64File.available()) {
-//        screen.println(F("End of M64 loaded into buffer"));
-        
-        // Set end
-        if (!bufferAInUse) {
-            // End of buffer B marks end when
-            bufferEndPos = INPUT_BUFFER_SIZE - 1;
-        } 
-        else if (!bufferBInUse) {
-            // End of buffer A marks end
-            bufferEndPos = INPUT_BUFFER_SIZE/2 - 1;
-        } else {
-            // Da fuq? (This should never happen)
-            Serial.println(F("Unexpected ending of input file"));
-      
-            // End immediatley
-            bufferEndPos = 0;
-            finished = true;
-        }
-    
-        // Close file
         m64File.close();
         return;
     }
-  
-    // Load buffer A when its not in use
-    if (!bufferALoaded && !bufferAInUse) {
-        //Serial.println(F("Loading inputs into buffer A"));
-        // Read bytes
-        readBytes = m64File.read(inputBuffer, INPUT_BUFFER_SIZE*2);
-        if (readBytes == 0) {
-            Serial.println(F("Failed to read next inputs from file. (This is recoverable)"));
-        }
-        else {
-            bufferALoaded = true;
-            if (readBytes != INPUT_BUFFER_SIZE*2) {
-//                screen.println(F("End of M64 file found. Loading remaining bytes."));
-                bufferEndPos = readBytes / 4 - 1;
-                // Close file
-                m64File.close();
-            }
-        }
+
+    size_t availableSize;
+    size_t writePos = getNextRegion(availableSize);
+
+    // Optimized chunk reads
+    if ((availableSize < 512 && (writePos % 512) == 0) || !availableSize)
+        return;
+
+    int readBytes = m64File.read(inputBuffer + writePos, availableSize);
+    if (readBytes <= 0) {
+      lockedPrintln(F("W:Failed to read next inputs from file. (This is recoverable)"));
+      return;
     }
-    // Load buffer B when its not in use
-    else if (!bufferBLoaded && !bufferBInUse) {
-        //Serial.println(F("Loading inputs into buffer B"));
-        // Read bytes
-        readBytes = m64File.read(inputBuffer + (INPUT_BUFFER_SIZE / 2), INPUT_BUFFER_SIZE*2);
-        if (readBytes == 0) {
-            Serial.println(F("Failed to read next inputs from file. (This is recoverable)"));
-        }
-        else {
-            bufferBLoaded = true;
-            if (readBytes != INPUT_BUFFER_SIZE*2) {
-//                screen.println(F("End of M64 file found. Loading remaining bytes."));
-                // buffer end is offset from middle
-                bufferEndPos = INPUT_BUFFER_SIZE / 2 + readBytes / 4 - 1;
-                // Close file
-                m64File.close();
-            }
-        }
-    }
+
+    noInterrupts();
+    bufferEndPos = writePos + readBytes;
+    bufferHasData = true;
+    interrupts();
 }
 
 static void startTimer()
@@ -771,15 +769,19 @@ static void get_n64_command()
   } \
 }\
 
+    edgesRead = 0;
+
     for (int i = 1; i <= bitcount; i++) {
         while (!N64_QUERY)
           FAIL_TIMEOUT;
         long lowTime = readTimer();
         startTimer();
+        edgesRead++;
         while (N64_QUERY)
           FAIL_TIMEOUT;
         long highTime = readTimer();
         startTimer();
+        edgesRead++;
         char bit = (lowTime < highTime);
         newByte <<= 1;
         newByte |= bit;
@@ -817,6 +819,7 @@ static void get_n64_command()
     while (readTimer() < MICRO_CYCLES * 2);
 
 fail:
+    incompleteCommand = newByte;
 
     LED_LOW;
 }
