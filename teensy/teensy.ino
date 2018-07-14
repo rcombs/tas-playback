@@ -24,7 +24,6 @@
 
 #include "crc_table.h"
 #include <SdFatConfig.h>
-#include <FreeStack.h>
 #include <MinimumSerial.h>
 #include <SdFat.h>
 #include <BlockDriver.h>
@@ -82,6 +81,9 @@ static volatile size_t bufferPos;
 static volatile bool bufferHasData;
 static void updateInputBuffer();
 
+static bool hold = false;
+static bool finished = false;
+
 static size_t getNextRegion(size_t& size) {
   size_t currentPos = bufferPos;
   if ((currentPos == bufferEndPos || (currentPos == 0 && bufferEndPos == INPUT_BUFFER_SIZE)) && bufferHasData) {
@@ -108,6 +110,8 @@ static void advanceBuffer(long bytes)
 {
   size_t pos = bufferPos + bytes;
   if (pos == bufferEndPos) {
+    if (hold)
+      return;
     bufferHasData = false;
     bufferPos = pos;
     return;
@@ -126,8 +130,15 @@ static size_t appendInputs(const String& data)
     size_t writePos = getNextRegion(writeLen);
     if (writeLen > dataLeft)
       writeLen = dataLeft;
-    memcpy(inputBuffer + writePos, data.c_str() + totalWritten, writeLen);
-    totalWritten += writeLen;
+    if (writeLen) {
+      memcpy(inputBuffer + writePos, data.c_str() + totalWritten, writeLen);
+      totalWritten += writeLen;
+      noInterrupts();
+      finished = false;
+      bufferEndPos = writePos + writeLen;
+      bufferHasData = true;
+      interrupts();
+    }
   } while (writeLen > 0);
   return totalWritten;
 }
@@ -135,8 +146,6 @@ static size_t appendInputs(const String& data)
 static FatFile m64File;
 static bool m64OpenSuccess = false;
 static bool openM64(const String& path);
-
-static bool finished = false;
 
 //static unsigned int progressPos = 0;
 static unsigned long numFrames = 0, curFrame = 0;
@@ -314,6 +323,8 @@ static void handleCommand(const String& cmd)
   } else if (cmd.startsWith("IN:")) {
     size_t len = appendInputs(hextobin(cmd.substring(3)));
     lockedPrintln("IN:", len);
+  } else if (cmd.startsWith("HL:")) {
+    hold = cmd[3] == '1';
   } else if (cmd.startsWith("CL:")) {
     writeFile.close();
     lockedPrintln("CL:OK");
@@ -384,11 +395,8 @@ static void n64Interrupt()
     startTimer();
     volatile uint32_t *config = portConfigRegister(N64_PIN);
     uint32_t oldConfig = *config;
+    bool haveFrame;
 //    unsigned int curPos;
-
-    // Bail if file open failed
-    if (!m64OpenSuccess)
-        goto end;
 
     *config &= ~0x000F0000;
 
@@ -421,18 +429,20 @@ static void n64Interrupt()
             Serial.println("P:");
             break;
         case 0x01:
+            haveFrame = (!finished && bufferHasData);
             // If the TAS is finished, there's nothing left to do.
-            if (finished || !bufferHasData)
-              memset(output_buffer, 0, 4);
-            else
+            if (haveFrame)
               memcpy(output_buffer, inputBuffer + bufferPos, 4);
+            else
+              memset(output_buffer, 0, 4);
         
             // blast out the pre-assembled array in output_buffer
             n64_send(output_buffer, 4, 1);
 
-            if (finished) {
+            if (!haveFrame)
               break;
-            }
+
+            curFrame++;
 
             logFrame();
 
@@ -443,15 +453,12 @@ static void n64Interrupt()
             Serial.print(F(" Data: "));
             Serial.println(inputBuffer[bufferPos]);*/
             
-            if (curFrame == numFrames && !finished) {
+            if (curFrame == numFrames) {
               Serial.println("C:");
               finished = true;
             }
 
-            curFrame++;
-
-            if (!finished && bufferHasData)
-              advanceBuffer(4);
+            advanceBuffer(4);
 
 //            while (Serial.availableForWrite() && readTimer() < 10 * 1000 * MICRO_CYCLES && N64_QUERY);
 
@@ -555,7 +562,6 @@ static void n64Interrupt()
             break;
     }
 
-end:
     *config = oldConfig;
 
     interrupts();
@@ -614,7 +620,7 @@ static bool openM64(const String& path) {
     m64File.seekSet(0x018);
   
     // Open header
-    int32_t newNumFrames;
+    uint32_t newNumFrames;
     if (m64File.read(&newNumFrames, 4) != 4) {
         m64File.close();
         Serial.println(F("E:Failed to read frame count"));
@@ -648,7 +654,6 @@ static bool openM64(const String& path) {
 
     Serial.write("N:");
     Serial.println(newNumFrames);
-
     Serial.flush();
 
     // Wait for the line to go idle, then begin listening
