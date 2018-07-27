@@ -48,6 +48,42 @@
 
 #define INPUT_BUFFER_UPDATE_TIMEOUT 10 // 10 ms
 
+#define MICRO_CYCLES (F_CPU / 1000000)
+
+#define MAX_CMD_LEN 4096
+#define MAX_LOOP_LEN 10240
+
+static bool skippingInput = false;
+static String inputString;
+
+static char n64_raw_dump[36]; // maximum recv is 1+2+32 bytes + 1 bit
+// n64_raw_dump does not include the command byte. That gets pushed into
+// n64_command:
+static int n64_command;
+// bytes to send to the 64
+// maximum we'll need to send is 33, 32 for a read request and 1 CRC byte
+static unsigned char output_buffer[33];
+
+// Simple switch buffer. (If buffer A fails to load while buffer B is in use,
+// we still okay, and will try again next loop)
+static char inputBuffer[INPUT_BUFFER_SIZE];
+static size_t bufferEndPos;
+static volatile size_t bufferPos;
+static volatile bool bufferHasData;
+static void updateInputBuffer();
+
+static bool hold = false;
+static bool finished = false;
+
+static FatFile tasFile;
+
+//static unsigned int progressPos = 0;
+static unsigned long numFrames = 0, curFrame = 0;
+static int edgesRead = 0;
+static int incompleteCommand = 0;
+
+static SdFatSdioEX sd;
+
 template<class T> void lockedPrintln(const T& input)
 {
   noInterrupts();
@@ -63,26 +99,15 @@ template<class A, class B> void lockedPrintln(const A& a, const B& b)
   interrupts();
 }
 
-static char n64_raw_dump[36]; // maximum recv is 1+2+32 bytes + 1 bit
-// n64_raw_dump does not include the command byte. That gets pushed into
-// n64_command:
-static int n64_command;
-// bytes to send to the 64
-// maximum we'll need to send is 33, 32 for a read request and 1 CRC byte
-static unsigned char output_buffer[33];
-static void get_n64_command();
-static void n64_send(unsigned char *buffer, char length, bool wide_stop);
+static void startTimer()
+{
+  ARM_DWT_CYCCNT = 0;
+}
 
-// Simple switch buffer. (If buffer A fails to load while buffer B is in use,
-// we still okay, and will try again next loop)
-static char inputBuffer[INPUT_BUFFER_SIZE];
-static size_t bufferEndPos;
-static volatile size_t bufferPos;
-static volatile bool bufferHasData;
-static void updateInputBuffer();
-
-static bool hold = false;
-static bool finished = false;
+static long readTimer()
+{
+  return ARM_DWT_CYCCNT;
+}
 
 static size_t getNextRegion(size_t& size) {
   size_t currentPos = bufferPos;
@@ -143,18 +168,6 @@ static size_t appendInputs(const String& data)
   return totalWritten;
 }
 
-static FatFile tasFile;
-static bool openTAS(const String& path);
-
-//static unsigned int progressPos = 0;
-static unsigned long numFrames = 0, curFrame = 0;
-static int edgesRead = 0;
-static int incompleteCommand = 0;
-
-SdFatSdioEX sd;
-
-#define MICRO_CYCLES (F_CPU / 1000000)
-
 static void emitList(const String& path)
 {
   FatFile dir;
@@ -170,40 +183,6 @@ static void emitList(const String& path)
     tasFile.close();
   }
   dir.close();
-}
-
-void setup()
-{
-  ARM_DEMCR |= ARM_DEMCR_TRCENA;
-  ARM_DWT_CTRL |= ARM_DWT_CTRL_CYCCNTENA;
-
-  Serial.begin(SERIAL_BAUD_RATE);
-  while (!Serial) { ; } // wait for serial port to connect. Needed for native USB port only
-
-  // Status LED
-  digitalWrite(STATUS_PIN, LOW);
-  pinMode(STATUS_PIN, OUTPUT);
-
-  // Communication with the N64 on this pin
-  digitalWrite(N64_PIN, LOW);
-  pinMode(N64_PIN, INPUT_PULLUP);
-
-  attachInterrupt(N64_PIN, n64Interrupt, FALLING);
-
-  // Let the N64 line interrupt anything else
-  NVIC_SET_PRIORITY(IRQ_PORTD, 1);
-
-  // Initialize SD card
-  if (!sd.begin()) {
-    Serial.println(F("E:SD initialization failed!"));
-    return;
-  }
-  Serial.println(F("L:SD initialization done."));
-
-  // Setup buffer
-  initBuffers();
-
-  Serial.println(F("L:Initialization done."));
 }
 
 void logFrame(const unsigned char *dat, size_t count, size_t num)
@@ -289,70 +268,6 @@ static void appendData(const String& data) {
     Serial.println("AP:NAK");
 }
 
-bool skippingInput = false;
-static String inputString;
-
-static void handleCommand(const String& cmd)
-{
-  if (cmd.startsWith("M:")) {
-    openTAS(cmd.substring(2));
-  } else if (cmd.startsWith("O:")) {
-    //dummy
-  } else if (cmd.startsWith("L:")) {
-    emitList(cmd.substring(2));
-  } else if (cmd.startsWith("MK:")) {
-    lockedPrintln("MK:", sd.mkdir(cmd.substring(3).c_str()));
-  } else if (cmd.startsWith("CR:")) {
-    if (writeFile.isOpen()) {
-      writeFile.close();
-    }
-    if (writeFile.open(&sd, cmd.substring(3).c_str(), O_WRITE | O_CREAT | O_TRUNC)) {
-      lockedPrintln("CR:OK");
-    } else {
-      lockedPrintln("CR:NAK");
-    }
-  } else if (cmd.startsWith("AP:")) {
-    appendData(hextobin(cmd.substring(3)));
-  } else if (cmd.startsWith("IN:")) {
-    size_t len = appendInputs(hextobin(cmd.substring(3)));
-    lockedPrintln("IN:", len);
-  } else if (cmd.startsWith("HL:")) {
-    hold = cmd[3] == '1';
-  } else if (cmd.startsWith("CL:")) {
-    writeFile.close();
-    lockedPrintln("CL:OK");
-  } else if (cmd.startsWith("PM:")) {
-    setPinMode(cmd.substring(3));
-  } else if (cmd.startsWith("DW:")) {
-    writePin(cmd.substring(3));
-  } else {
-    lockedPrintln("E:Unknown CMD:", cmd.c_str());
-  }
-}
-
-#define MAX_CMD_LEN 4096
-#define MAX_LOOP_LEN 10240
-
-static void inputLoop()
-{
-  int newChar;
-  int charsRead = 0;
-  while ((newChar = Serial.read()) != -1 && (charsRead++ <= MAX_LOOP_LEN)) {
-    if (newChar == '\n') {
-      if (skippingInput)
-        Serial.println("E:Skipped too-long line");
-      else
-        handleCommand(inputString);
-      inputString = "";
-      skippingInput = false;
-    } else if (inputString.length() > MAX_CMD_LEN) {
-      skippingInput = true;
-    } else {
-      inputString += (char)newChar;
-    }
-  }
-}
-
 static void waitForIdle(int us)
 {
   LED_HIGH;
@@ -366,17 +281,248 @@ static void waitForIdle(int us)
   LED_LOW;
 }
 
-static void mainLoop()
-{
-  updateInputBuffer();
+static bool openTAS(const String& path) {
+    char signature[4];
+    int version;
+
+    Serial.write("M:");
+    Serial.println(path);
   
-  // Record if it took longer than expected
-  /*updateTime = readTimer();
-  if (updateTime > 1000 * MICRO_CYCLES) {
-      Serial.print(F("Input buffer update took too long ("));
-      Serial.print(updateTime / MICRO_CYCLES);
-      Serial.println(F(" us)"));
-  }*/
+    // Open the file for reading:
+    Serial.print(F("L:Opening file '"));
+    Serial.print(path);
+    Serial.println(F("'..."));
+
+    Serial.flush();
+
+    if (tasFile.isOpen())
+      tasFile.close();
+  
+    // Error check
+    if (!tasFile.open(&sd, path.c_str(), O_READ)) {
+        Serial.println(F("E:Error in opening file"));
+        return false;
+    }
+  
+    // Open header
+    if (tasFile.read(signature, 4) != 4 || tasFile.read(&version, 4) != 4) {
+        tasFile.close();
+        Serial.println(F("E:Failed to read signature"));
+        return false;
+    }
+  
+    // Validate file signature
+    if (memcmp(signature, "M64\x1A", 4) != 0) {
+        Serial.println(F("E:m64 signature invalid"));
+        tasFile.close();
+        return false;
+    }
+      
+    // Print version
+    Serial.print(F("L:M64 Version: "));
+    Serial.println(version);
+
+    Serial.flush();
+
+    tasFile.seekSet(0x018);
+  
+    // Open header
+    uint32_t newNumFrames;
+    if (tasFile.read(&newNumFrames, 4) != 4) {
+        tasFile.close();
+        Serial.println(F("E:Failed to read frame count"));
+        return false;
+    }
+  
+    // Get header size
+    switch(version) {
+        case 1:
+        case 2:
+            tasFile.seekSet(0x200);
+            break;
+        case 3:
+            tasFile.seekSet(0x400);
+            break;
+        default:
+          // Unknown version
+            Serial.println(F("E:unknown M64 version"));
+            tasFile.close();
+            return false;
+    }
+  
+    // Final check
+    if (!tasFile.available()) {
+        Serial.println(F("E:No input data found in file"));
+        tasFile.close();
+        return false;
+    }
+
+    newNumFrames = min(newNumFrames, (tasFile.fileSize() - tasFile.curPosition()) / 4);
+
+    Serial.write("N:");
+    Serial.println(newNumFrames);
+    Serial.flush();
+
+    // Wait for the line to go idle, then begin listening
+    /*
+    for (int idle_wait=32; idle_wait>0; --idle_wait) {
+        if (!N64_QUERY) {
+            idle_wait = 32;
+        }
+    }*/
+
+    noInterrupts();
+    finished = false;
+    initBuffers();
+    curFrame = 0;
+    numFrames = newNumFrames;
+    interrupts();
+ 
+    return true;
+}
+
+static void updateInputBuffer() {
+    if (finished || !tasFile.isOpen())
+      return;
+  
+    // Check for file end
+    if (!tasFile.available()) {
+        tasFile.close();
+        return;
+    }
+
+    size_t availableSize;
+    size_t writePos = getNextRegion(availableSize);
+
+    // Optimized chunk reads
+    if ((availableSize < 512 && (writePos % 512) == 0) || !availableSize)
+        return;
+
+    int readBytes = tasFile.read(inputBuffer + writePos, availableSize);
+    if (readBytes <= 0) {
+      lockedPrintln(F("W:Failed to read next inputs from file. (This is recoverable)"));
+      return;
+    }
+
+    noInterrupts();
+    bufferEndPos = writePos + readBytes;
+    bufferHasData = true;
+    interrupts();
+}
+
+/**
+ * Complete copy and paste of gc_send, but with the N64
+ * pin being manipulated instead.
+ */
+static void n64_send(unsigned char *buffer, char length, bool wide_stop)
+{
+  long target;
+  LED_HIGH;
+  N64_LOW;
+  startTimer();
+
+  for (int i = 0; i < length * 8; i++) {
+    char bit = (buffer[i >> 3] >> (7 - (i & 7))) & 1;
+    target = MICRO_CYCLES * (3 - bit * 2);
+    while (readTimer() < target);
+      N64_HIGH;
+    while (readTimer() < MICRO_CYCLES * 4);
+      N64_LOW;
+    startTimer();
+  }
+
+  target = MICRO_CYCLES * (1 + wide_stop);
+
+  while (readTimer() < target);
+
+  N64_HIGH;
+  startTimer();
+  while (!N64_QUERY && readTimer() < MICRO_CYCLES * 4);
+  LED_LOW;
+}
+
+/**
+  * Waits for an incomming signal on the N64 pin and reads the command,
+  * and if necessary, any trailing bytes.
+  * 0x00 is an identify request
+  * 0x01 is a status request
+  * 0x02 is a controller pack read
+  * 0x03 is a controller pack write
+  *
+  * for 0x02 and 0x03, additional data is passed in after the command byte,
+  * which is also read by this function.
+  *
+  * All data is raw dumped to the n64_raw_dump array, 1 bit per byte, except
+  * for the command byte, which is placed all packed into n64_command
+  */
+static void get_n64_command()
+{
+    int bitcount = 8;
+    n64_command = 0;
+    char newByte = 0;
+
+    LED_HIGH;
+
+#define FAIL_TIMEOUT {\
+  if (readTimer() >= MICRO_CYCLES * 10) {\
+    n64_command = -1; \
+    goto fail; \
+  } \
+}\
+
+    edgesRead = 0;
+
+    for (int i = 1; i <= bitcount; i++) {
+        while (!N64_QUERY)
+          FAIL_TIMEOUT;
+        long lowTime = readTimer();
+        startTimer();
+        edgesRead++;
+        while (N64_QUERY)
+          FAIL_TIMEOUT;
+        long highTime = readTimer();
+        startTimer();
+        edgesRead++;
+        char bit = (lowTime < highTime);
+        newByte <<= 1;
+        newByte |= bit;
+
+        if (i == 8) {
+          n64_command = newByte;
+          switch (newByte) {
+              case (0x03):
+                  // write command
+                  // we expect a 2 byte address and 32 bytes of data
+                  bitcount += 272; // 34 bytes * 8 bits per byte
+                  //Serial.println("command is 0x03, write");
+                  break;
+              case (0x02):
+                  // read command 0x02
+                  // we expect a 2 byte address
+                  bitcount += 16;
+                  //Serial.println("command is 0x02, read");
+                  break;
+              case (0x00):
+              case (0x01):
+              default:
+                  // get the last (stop) bit
+                  break;
+          }
+        } else if (!(i & 7)) {
+          n64_raw_dump[(i >> 3) - 1] = newByte;
+        }
+    }
+
+    // Wait for the stop bit
+    while (!N64_QUERY)
+      FAIL_TIMEOUT;
+    startTimer();
+    while (readTimer() < MICRO_CYCLES * 2);
+
+fail:
+    incompleteCommand = newByte;
+
+    LED_LOW;
 }
 
 static void n64Interrupt()
@@ -560,6 +706,76 @@ static void n64Interrupt()
     interrupts();
 }
 
+static void handleCommand(const String& cmd)
+{
+  if (cmd.startsWith("M:")) {
+    openTAS(cmd.substring(2));
+  } else if (cmd.startsWith("O:")) {
+    //dummy
+  } else if (cmd.startsWith("L:")) {
+    emitList(cmd.substring(2));
+  } else if (cmd.startsWith("MK:")) {
+    lockedPrintln("MK:", sd.mkdir(cmd.substring(3).c_str()));
+  } else if (cmd.startsWith("CR:")) {
+    if (writeFile.isOpen()) {
+      writeFile.close();
+    }
+    if (writeFile.open(&sd, cmd.substring(3).c_str(), O_WRITE | O_CREAT | O_TRUNC)) {
+      lockedPrintln("CR:OK");
+    } else {
+      lockedPrintln("CR:NAK");
+    }
+  } else if (cmd.startsWith("AP:")) {
+    appendData(hextobin(cmd.substring(3)));
+  } else if (cmd.startsWith("IN:")) {
+    size_t len = appendInputs(hextobin(cmd.substring(3)));
+    lockedPrintln("IN:", len);
+  } else if (cmd.startsWith("HL:")) {
+    hold = cmd[3] == '1';
+  } else if (cmd.startsWith("CL:")) {
+    writeFile.close();
+    lockedPrintln("CL:OK");
+  } else if (cmd.startsWith("PM:")) {
+    setPinMode(cmd.substring(3));
+  } else if (cmd.startsWith("DW:")) {
+    writePin(cmd.substring(3));
+  } else {
+    lockedPrintln("E:Unknown CMD:", cmd.c_str());
+  }
+}
+
+static void inputLoop()
+{
+  int newChar;
+  int charsRead = 0;
+  while ((newChar = Serial.read()) != -1 && (charsRead++ <= MAX_LOOP_LEN)) {
+    if (newChar == '\n') {
+      if (skippingInput)
+        Serial.println("E:Skipped too-long line");
+      else
+        handleCommand(inputString);
+      inputString = "";
+      skippingInput = false;
+    } else if (inputString.length() > MAX_CMD_LEN) {
+      skippingInput = true;
+    } else {
+      inputString += (char)newChar;
+    }
+  }
+}
+
+static void mainLoop()
+{
+  updateInputBuffer();
+  
+  // Record if it took longer than expected
+  /*updateTime = readTimer();
+  if (updateTime > 1000 * MICRO_CYCLES) {
+      Serial.print(F("Input buffer update took too long ("));
+      Serial.print(updateTime / MICRO_CYCLES);
+      Serial.println(F(" us)"));
+  }*/
+}
 
 void loop()
 {
@@ -567,256 +783,38 @@ void loop()
     mainLoop();
 }
 
-static bool openTAS(const String& path) {
-    char signature[4];
-    int version;
-
-    Serial.write("M:");
-    Serial.println(path);
-  
-    // Open the file for reading:
-    Serial.print(F("L:Opening file '"));
-    Serial.print(path);
-    Serial.println(F("'..."));
-
-    Serial.flush();
-
-    if (tasFile.isOpen())
-      tasFile.close();
-  
-    // Error check
-    if (!tasFile.open(&sd, path.c_str(), O_READ)) {
-        Serial.println(F("E:Error in opening file"));
-        return false;
-    }
-  
-    // Open header
-    if (tasFile.read(signature, 4) != 4 || tasFile.read(&version, 4) != 4) {
-        tasFile.close();
-        Serial.println(F("E:Failed to read signature"));
-        return false;
-    }
-  
-    // Validate file signature
-    if (memcmp(signature, "M64\x1A", 4) != 0) {
-        Serial.println(F("E:m64 signature invalid"));
-        tasFile.close();
-        return false;
-    }
-      
-    // Print version
-    Serial.print(F("L:M64 Version: "));
-    Serial.println(version);
-
-    Serial.flush();
-
-    tasFile.seekSet(0x018);
-  
-    // Open header
-    uint32_t newNumFrames;
-    if (tasFile.read(&newNumFrames, 4) != 4) {
-        tasFile.close();
-        Serial.println(F("E:Failed to read frame count"));
-        return false;
-    }
-  
-    // Get header size
-    switch(version) {
-        case 1:
-        case 2:
-            tasFile.seekSet(0x200);
-            break;
-        case 3:
-            tasFile.seekSet(0x400);
-            break;
-        default:
-          // Unknown version
-            Serial.println(F("E:unknown M64 version"));
-            tasFile.close();
-            return false;
-    }
-  
-    // Final check
-    if (!tasFile.available()) {
-        Serial.println(F("E:No input data found in file"));
-        tasFile.close();
-        return false;
-    }
-
-    newNumFrames = min(newNumFrames, (tasFile.fileSize() - tasFile.curPosition()) / 4);
-
-    Serial.write("N:");
-    Serial.println(newNumFrames);
-    Serial.flush();
-
-    // Wait for the line to go idle, then begin listening
-    /*
-    for (int idle_wait=32; idle_wait>0; --idle_wait) {
-        if (!N64_QUERY) {
-            idle_wait = 32;
-        }
-    }*/
-
-    noInterrupts();
-    finished = false;
-    initBuffers();
-    curFrame = 0;
-    numFrames = newNumFrames;
-    interrupts();
- 
-    return true;
-}
-
-static void updateInputBuffer() {
-    if (finished || !tasFile.isOpen())
-      return;
-  
-    // Check for file end
-    if (!tasFile.available()) {
-        tasFile.close();
-        return;
-    }
-
-    size_t availableSize;
-    size_t writePos = getNextRegion(availableSize);
-
-    // Optimized chunk reads
-    if ((availableSize < 512 && (writePos % 512) == 0) || !availableSize)
-        return;
-
-    int readBytes = tasFile.read(inputBuffer + writePos, availableSize);
-    if (readBytes <= 0) {
-      lockedPrintln(F("W:Failed to read next inputs from file. (This is recoverable)"));
-      return;
-    }
-
-    noInterrupts();
-    bufferEndPos = writePos + readBytes;
-    bufferHasData = true;
-    interrupts();
-}
-
-static void startTimer()
+void setup()
 {
-  ARM_DWT_CYCCNT = 0;
-}
+  ARM_DEMCR |= ARM_DEMCR_TRCENA;
+  ARM_DWT_CTRL |= ARM_DWT_CTRL_CYCCNTENA;
 
-static long readTimer()
-{
-  return ARM_DWT_CYCCNT;
-}
+  Serial.begin(SERIAL_BAUD_RATE);
+  while (!Serial) { ; } // wait for serial port to connect. Needed for native USB port only
 
-/**
- * Complete copy and paste of gc_send, but with the N64
- * pin being manipulated instead.
- */
-static void n64_send(unsigned char *buffer, char length, bool wide_stop)
-{
-  long target;
-  LED_HIGH;
-  N64_LOW;
-  startTimer();
+  // Status LED
+  digitalWrite(STATUS_PIN, LOW);
+  pinMode(STATUS_PIN, OUTPUT);
 
-  for (int i = 0; i < length * 8; i++) {
-    char bit = (buffer[i >> 3] >> (7 - (i & 7))) & 1;
-    target = MICRO_CYCLES * (3 - bit * 2);
-    while (readTimer() < target);
-      N64_HIGH;
-    while (readTimer() < MICRO_CYCLES * 4);
-      N64_LOW;
-    startTimer();
+  // Configure controller pins
+  pinMode(N64_PIN, INPUT_PULLUP);
+  digitalWrite(N64_PIN, LOW);
+
+  attachInterrupt(N64_PIN, n64Interrupt, FALLING);
+
+  // Let the N64 line interrupt anything else
+  NVIC_SET_PRIORITY(IRQ_PORTD, 1);
+
+  // Initialize SD card
+  if (!sd.begin()) {
+    Serial.println(F("E:SD initialization failed!"));
+    return;
   }
+  Serial.println(F("L:SD initialization done."));
 
-  target = MICRO_CYCLES * (1 + wide_stop);
+  // Setup buffer
+  initBuffers();
 
-  while (readTimer() < target);
-
-  N64_HIGH;
-  startTimer();
-  while (!N64_QUERY && readTimer() < MICRO_CYCLES * 4);
-  LED_LOW;
+  Serial.println(F("L:Initialization done."));
 }
 
-/**
-  * Waits for an incomming signal on the N64 pin and reads the command,
-  * and if necessary, any trailing bytes.
-  * 0x00 is an identify request
-  * 0x01 is a status request
-  * 0x02 is a controller pack read
-  * 0x03 is a controller pack write
-  *
-  * for 0x02 and 0x03, additional data is passed in after the command byte,
-  * which is also read by this function.
-  *
-  * All data is raw dumped to the n64_raw_dump array, 1 bit per byte, except
-  * for the command byte, which is placed all packed into n64_command
-  */
-static void get_n64_command()
-{
-    int bitcount = 8;
-    n64_command = 0;
-    char newByte = 0;
 
-    LED_HIGH;
-
-#define FAIL_TIMEOUT {\
-  if (readTimer() >= MICRO_CYCLES * 10) {\
-    n64_command = -1; \
-    goto fail; \
-  } \
-}\
-
-    edgesRead = 0;
-
-    for (int i = 1; i <= bitcount; i++) {
-        while (!N64_QUERY)
-          FAIL_TIMEOUT;
-        long lowTime = readTimer();
-        startTimer();
-        edgesRead++;
-        while (N64_QUERY)
-          FAIL_TIMEOUT;
-        long highTime = readTimer();
-        startTimer();
-        edgesRead++;
-        char bit = (lowTime < highTime);
-        newByte <<= 1;
-        newByte |= bit;
-
-        if (i == 8) {
-          n64_command = newByte;
-          switch (newByte) {
-              case (0x03):
-                  // write command
-                  // we expect a 2 byte address and 32 bytes of data
-                  bitcount += 272; // 34 bytes * 8 bits per byte
-                  //Serial.println("command is 0x03, write");
-                  break;
-              case (0x02):
-                  // read command 0x02
-                  // we expect a 2 byte address
-                  bitcount += 16;
-                  //Serial.println("command is 0x02, read");
-                  break;
-              case (0x00):
-              case (0x01):
-              default:
-                  // get the last (stop) bit
-                  break;
-          }
-        } else if (!(i & 7)) {
-          n64_raw_dump[(i >> 3) - 1] = newByte;
-        }
-    }
-
-    // Wait for the stop bit
-    while (!N64_QUERY)
-      FAIL_TIMEOUT;
-    startTimer();
-    while (readTimer() < MICRO_CYCLES * 2);
-
-fail:
-    incompleteCommand = newByte;
-
-    LED_LOW;
-}
