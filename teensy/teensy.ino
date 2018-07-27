@@ -143,9 +143,8 @@ static size_t appendInputs(const String& data)
   return totalWritten;
 }
 
-static FatFile m64File;
-static bool m64OpenSuccess = false;
-static bool openM64(const String& path);
+static FatFile tasFile;
+static bool openTAS(const String& path);
 
 //static unsigned int progressPos = 0;
 static unsigned long numFrames = 0, curFrame = 0;
@@ -164,11 +163,11 @@ static void emitList(const String& path)
     return;
   }
   dir.rewind();
-  while (m64File.openNext(&dir)) {
+  while (tasFile.openNext(&dir)) {
     char name[256];
-    m64File.getName(name, sizeof(name));
+    tasFile.getName(name, sizeof(name));
     lockedPrintln("A:", name);
-    m64File.close();
+    tasFile.close();
   }
   dir.close();
 }
@@ -196,7 +195,6 @@ void setup()
 
   // Initialize SD card
   if (!sd.begin()) {
-    m64OpenSuccess = false; 
     Serial.println(F("E:SD initialization failed!"));
     return;
   }
@@ -208,19 +206,14 @@ void setup()
   Serial.println(F("L:Initialization done."));
 }
 
-void logFrame()
+void logFrame(const unsigned char *dat, size_t count, size_t num)
 {
-  const unsigned char *dat = (const unsigned char*)(inputBuffer + bufferPos);
   Serial.write("F:");
-  Serial.print(curFrame);
-  Serial.write(" ");
-  Serial.print(dat[0], HEX);
-  Serial.write(" ");
-  Serial.print(dat[1], HEX);
-  Serial.write(" ");
-  Serial.print(dat[2], HEX);
-  Serial.write(" ");
-  Serial.println(dat[3], HEX);
+  Serial.print(num);
+  for (size_t i = 0; i < count; i++) {
+    Serial.write(" ");
+    Serial.print(dat[i], HEX);
+  }
 }
 
 static bool setPinMode(const String& cmd)
@@ -302,7 +295,7 @@ static String inputString;
 static void handleCommand(const String& cmd)
 {
   if (cmd.startsWith("M:")) {
-    openM64(cmd.substring(2));
+    openTAS(cmd.substring(2));
   } else if (cmd.startsWith("O:")) {
     //dummy
   } else if (cmd.startsWith("L:")) {
@@ -439,12 +432,12 @@ static void n64Interrupt()
             // blast out the pre-assembled array in output_buffer
             n64_send(output_buffer, 4, 1);
 
+            logFrame(output_buffer, 4, curFrame + 1);
+
             if (!haveFrame)
               break;
 
             curFrame++;
-
-            logFrame();
 
             // update input buffer and make sure it doesn't take too long
 
@@ -574,7 +567,7 @@ void loop()
     mainLoop();
 }
 
-static bool openM64(const String& path) {
+static bool openTAS(const String& path) {
     char signature[4];
     int version;
 
@@ -588,18 +581,18 @@ static bool openM64(const String& path) {
 
     Serial.flush();
 
-    if (m64File.isOpen())
-      m64File.close();
+    if (tasFile.isOpen())
+      tasFile.close();
   
     // Error check
-    if (!m64File.open(&sd, path.c_str(), O_READ)) {
+    if (!tasFile.open(&sd, path.c_str(), O_READ)) {
         Serial.println(F("E:Error in opening file"));
         return false;
     }
   
     // Open header
-    if (m64File.read(signature, 4) != 4 || m64File.read(&version, 4) != 4) {
-        m64File.close();
+    if (tasFile.read(signature, 4) != 4 || tasFile.read(&version, 4) != 4) {
+        tasFile.close();
         Serial.println(F("E:Failed to read signature"));
         return false;
     }
@@ -607,7 +600,7 @@ static bool openM64(const String& path) {
     // Validate file signature
     if (memcmp(signature, "M64\x1A", 4) != 0) {
         Serial.println(F("E:m64 signature invalid"));
-        m64File.close();
+        tasFile.close();
         return false;
     }
       
@@ -617,12 +610,12 @@ static bool openM64(const String& path) {
 
     Serial.flush();
 
-    m64File.seekSet(0x018);
+    tasFile.seekSet(0x018);
   
     // Open header
     uint32_t newNumFrames;
-    if (m64File.read(&newNumFrames, 4) != 4) {
-        m64File.close();
+    if (tasFile.read(&newNumFrames, 4) != 4) {
+        tasFile.close();
         Serial.println(F("E:Failed to read frame count"));
         return false;
     }
@@ -631,26 +624,26 @@ static bool openM64(const String& path) {
     switch(version) {
         case 1:
         case 2:
-            m64File.seekSet(0x200);
+            tasFile.seekSet(0x200);
             break;
         case 3:
-            m64File.seekSet(0x400);
+            tasFile.seekSet(0x400);
             break;
         default:
           // Unknown version
             Serial.println(F("E:unknown M64 version"));
-            m64File.close();
+            tasFile.close();
             return false;
     }
   
     // Final check
-    if (!m64File.available()) {
+    if (!tasFile.available()) {
         Serial.println(F("E:No input data found in file"));
-        m64File.close();
+        tasFile.close();
         return false;
     }
 
-    newNumFrames = min(newNumFrames, (m64File.fileSize() - m64File.curPosition()) / 4);
+    newNumFrames = min(newNumFrames, (tasFile.fileSize() - tasFile.curPosition()) / 4);
 
     Serial.write("N:");
     Serial.println(newNumFrames);
@@ -665,7 +658,6 @@ static bool openM64(const String& path) {
     }*/
 
     noInterrupts();
-    m64OpenSuccess = true;
     finished = false;
     initBuffers();
     curFrame = 0;
@@ -676,12 +668,12 @@ static bool openM64(const String& path) {
 }
 
 static void updateInputBuffer() {
-    if (finished || !m64File.isOpen())
+    if (finished || !tasFile.isOpen())
       return;
   
     // Check for file end
-    if (!m64File.available()) {
-        m64File.close();
+    if (!tasFile.available()) {
+        tasFile.close();
         return;
     }
 
@@ -692,7 +684,7 @@ static void updateInputBuffer() {
     if ((availableSize < 512 && (writePos % 512) == 0) || !availableSize)
         return;
 
-    int readBytes = m64File.read(inputBuffer + writePos, availableSize);
+    int readBytes = tasFile.read(inputBuffer + writePos, availableSize);
     if (readBytes <= 0) {
       lockedPrintln(F("W:Failed to read next inputs from file. (This is recoverable)"));
       return;
