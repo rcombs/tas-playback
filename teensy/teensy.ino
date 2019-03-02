@@ -29,16 +29,23 @@
 #include <BlockDriver.h>
 #include <SysCall.h>
 #include <DMAChannel.h>
+#include <EEPROM.h>
 
 #define STATUS_PIN 13
+#define POWER_PIN 32
+#define VI_PIN 35
+#define FIELD_PIN 36
 
 #define SERIAL_BAUD_RATE 115200
 
-#define N64_PIN 2
+#define N64_PIN 38
+#define SNES_LATCH_PIN 3
+#define SNES_CLOCK_PIN 4
+#define SNES_DATA_PIN 5
 
-#define N64_HIGH (CORE_PIN2_DDRREG &= ~CORE_PIN2_BITMASK) //digitalWriteFast(N64_PIN, HIGH)
-#define N64_LOW (CORE_PIN2_DDRREG |= CORE_PIN2_BITMASK) //digitalWriteFast(N64_PIN, LOW)
-#define N64_QUERY ((CORE_PIN2_PINREG & CORE_PIN2_BITMASK) ? 1 : 0) //digitalReadFast(N64_PIN)
+#define N64_HIGH (CORE_PIN38_DDRREG &= ~CORE_PIN38_BITMASK) //digitalWriteFast(N64_PIN, HIGH)
+#define N64_LOW (CORE_PIN38_DDRREG |= CORE_PIN38_BITMASK) //digitalWriteFast(N64_PIN, LOW)
+#define N64_QUERY ((CORE_PIN38_PINREG & CORE_PIN38_BITMASK) ? 1 : 0) //digitalReadFast(N64_PIN)
 
 #define LED_HIGH (CORE_PIN13_PORTSET = CORE_PIN13_BITMASK) //digitalWriteFast(STATUS_PIN, HIGH)
 #define LED_LOW (CORE_PIN13_PORTCLEAR = CORE_PIN13_BITMASK) //digitalWriteFast(STATUS_PIN, LOW)
@@ -49,9 +56,18 @@
 #define INPUT_BUFFER_UPDATE_TIMEOUT 10 // 10 ms
 
 #define MICRO_CYCLES (F_CPU / 1000000)
+#define MICRO_BUS_CYCLES (F_BUS / 1000000ULL)
 
 #define MAX_CMD_LEN 4096
 #define MAX_LOOP_LEN 10240
+
+typedef enum Console {
+  N64 = 0,
+  NES = 1,
+  SNES = 2,
+} Console;
+
+static Console console = N64;
 
 static bool skippingInput = false;
 static String inputString;
@@ -66,7 +82,7 @@ static unsigned char output_buffer[33];
 
 // Simple switch buffer. (If buffer A fails to load while buffer B is in use,
 // we still okay, and will try again next loop)
-static char inputBuffer[INPUT_BUFFER_SIZE];
+static unsigned char inputBuffer[INPUT_BUFFER_SIZE];
 static size_t bufferEndPos;
 static volatile size_t bufferPos;
 static volatile bool bufferHasData;
@@ -81,8 +97,17 @@ static FatFile tasFile;
 static unsigned long numFrames = 0, curFrame = 0;
 static int edgesRead = 0;
 static int incompleteCommand = 0;
+static volatile unsigned long viCount = 0;
 
 static SdFatSdioEX sd;
+
+static uint16_t currentSnesFrame;
+
+static uint32_t frameDuration = 0;
+
+static uint64_t finalTime = 0;
+static uint64_t lastFrameTime = 0;
+static int doLoop = 0;
 
 template<class T> void lockedPrintln(const T& input)
 {
@@ -104,10 +129,48 @@ static void startTimer()
   ARM_DWT_CYCCNT = 0;
 }
 
-static long readTimer()
+static uint32_t readTimer()
 {
   return ARM_DWT_CYCCNT;
 }
+
+static bool timer64Started = false;
+
+static void start64Timer()
+{
+  // turn on PIT
+  SIM_SCGC6 |= SIM_SCGC6_PIT;
+  __asm__ volatile("nop"); // solves timing problem on Teensy 3.5
+  PIT_MCR = 0x00;
+
+  // Timer 1
+  PIT_TCTRL1 = 0x0; // disable timer 1 and its interrupts
+  PIT_LDVAL1 = 0xFFFFFFFF; // setup timer 1 for maximum counting period
+  PIT_TCTRL1 |= PIT_TCTRL_CHN; // chain timer 1 to timer 0
+  PIT_TCTRL1 |= PIT_TCTRL_TEN; // start timer 1
+
+  // Timer 0
+  PIT_TCTRL0 = 0; // disable timer 0 and its interrupts
+  PIT_LDVAL0 = 0xFFFFFFFF; // setup timer 0 for maximum counting period
+  PIT_TCTRL0 = PIT_TCTRL_TEN; // start timer 0
+  timer64Started = true;
+}
+
+static uint64_t read64Timer()
+{
+  if (!timer64Started)
+    return 0;
+  
+#ifndef PIT_LTMR64H
+#define PIT_LTMR64H             (*(volatile uint32_t *)0x400370E0) // PIT Upper Lifetime Timer Register
+#define PIT_LTMR64L             (*(volatile uint32_t *)0x400370E4) // PIT Lower Lifetime Timer Register
+#endif
+
+  uint64_t current_uptime = (uint64_t)PIT_LTMR64H << 32;
+  current_uptime = current_uptime + PIT_LTMR64L;
+  return 0xffffffffffffffffull - current_uptime;
+}
+
 
 static size_t getNextRegion(size_t& size) {
   size_t currentPos = bufferPos;
@@ -133,6 +196,16 @@ void initBuffers()
 
 static void advanceBuffer(long bytes)
 {
+  curFrame++;
+
+  lastFrameTime = read64Timer();
+            
+  if (curFrame == numFrames) {
+    lockedPrintln("C:", lastFrameTime / (double)(MICRO_BUS_CYCLES * 1000 * 1000));
+    finished = true;
+    finalTime = lastFrameTime;
+  }
+
   size_t pos = bufferPos + bytes;
   if (pos == bufferEndPos) {
     if (hold)
@@ -176,11 +249,12 @@ static void emitList(const String& path)
     return;
   }
   dir.rewind();
-  while (tasFile.openNext(&dir)) {
+  FatFile listFile;
+  while (listFile.openNext(&dir)) {
     char name[256];
-    tasFile.getName(name, sizeof(name));
+    listFile.getName(name, sizeof(name));
     lockedPrintln("A:", name);
-    tasFile.close();
+    listFile.close();
   }
   dir.close();
 }
@@ -189,10 +263,15 @@ void logFrame(const unsigned char *dat, size_t count, size_t num)
 {
   Serial.write("F:");
   Serial.print(num);
+  Serial.print(" ");
+  Serial.print(read64Timer() / (double)(MICRO_BUS_CYCLES * 1000 * 1000), 6);
+  Serial.print(" ");
+  Serial.print(viCount);
   for (size_t i = 0; i < count; i++) {
     Serial.write(" ");
     Serial.print(dat[i], HEX);
   }
+  Serial.print("\n");
 }
 
 static bool setPinMode(const String& cmd)
@@ -237,6 +316,66 @@ static bool writePin(const String& cmd)
   return true;
 }
 
+static bool setPower(const String& cmd)
+{
+  if (cmd.length() < 1)
+    return false;
+
+  if (cmd[0] == '0') {
+    digitalWrite(POWER_PIN, LOW);
+  } else if (cmd[0] == '1') {
+    viCount = 0;
+    timer64Started = 0;
+    digitalWrite(POWER_PIN, HIGH);
+  } else {
+    return false;
+  }
+
+  return true;
+}
+
+static bool setLoop(const String& cmd)
+{
+  if (cmd.length() < 1)
+    return false;
+
+  if (cmd[0] == '0') {
+    doLoop = 0;
+  } else if (cmd[0] == '1') {
+    doLoop = 1;
+  } else {
+    return false;
+  }
+
+  return true;
+}
+
+void setupConsole()
+{
+  if (console == N64) {
+    attachInterrupt(N64_PIN, n64Interrupt, FALLING);
+  } else if (console == NES || console == SNES) {
+    attachInterrupt(SNES_LATCH_PIN, snesLatchInterrupt, RISING);
+    attachInterrupt(SNES_CLOCK_PIN, snesClockInterrupt, RISING);
+  }
+}
+
+static bool setConsole(const String& cmd)
+{
+  if (cmd == "N64")
+    console = N64;
+  else if (cmd == "NES")
+    console = NES;
+  else if (cmd == "SNES")
+    console = SNES;
+  else
+    return false;
+
+  setupConsole();
+
+  return true;
+}
+
 String hextobin(const String& hex)
 {
   String ret;
@@ -268,7 +407,7 @@ static void appendData(const String& data) {
     Serial.println("AP:NAK");
 }
 
-static void waitForIdle(int us)
+static void waitForIdle(unsigned us)
 {
   LED_HIGH;
   N64_HIGH;
@@ -376,7 +515,13 @@ static bool openTAS(const String& path) {
     initBuffers();
     curFrame = 0;
     numFrames = newNumFrames;
+    console = N64;
     interrupts();
+
+    setupConsole();
+
+    if (doLoop)
+      setPower("1");
  
     return true;
 }
@@ -416,7 +561,7 @@ static void updateInputBuffer() {
  */
 static void n64_send(unsigned char *buffer, char length, bool wide_stop)
 {
-  long target;
+  unsigned long target;
   LED_HIGH;
   N64_LOW;
   startTimer();
@@ -565,7 +710,10 @@ static void n64Interrupt()
             output_buffer[2] = 0x01;
 
             n64_send(output_buffer, 3, 1);
-            Serial.println("P:");
+            Serial.print("P:");
+            Serial.println(viCount);
+            viCount = 0;
+            start64Timer();
             break;
         case 0x01:
             haveFrame = (!finished && bufferHasData);
@@ -578,12 +726,10 @@ static void n64Interrupt()
             // blast out the pre-assembled array in output_buffer
             n64_send(output_buffer, 4, 1);
 
-            logFrame(output_buffer, 4, curFrame + 1);
+            logFrame(output_buffer, 4, curFrame + (haveFrame ? 1 : 0));
 
             if (!haveFrame)
               break;
-
-            curFrame++;
 
             // update input buffer and make sure it doesn't take too long
 
@@ -591,11 +737,6 @@ static void n64Interrupt()
             Serial.print(bufferPos);
             Serial.print(F(" Data: "));
             Serial.println(inputBuffer[bufferPos]);*/
-            
-            if (curFrame == numFrames) {
-              Serial.println("C:");
-              finished = true;
-            }
 
             advanceBuffer(4);
 
@@ -706,6 +847,69 @@ static void n64Interrupt()
     interrupts();
 }
 
+static void snesWriteBit()
+{
+  digitalWrite(SNES_DATA_PIN, (currentSnesFrame & 0x8000) ? LOW : HIGH);
+  if (currentSnesFrame & 0x8000)
+    LED_HIGH;
+  else
+    LED_LOW;
+  currentSnesFrame <<= 1;
+  currentSnesFrame |= 1;
+}
+
+static void snesLatchInterrupt()
+{
+  noInterrupts();
+  int haveFrame = (!finished && bufferHasData);
+  int len = (console == SNES) ? 2 : 1;
+  if (!haveFrame) {
+    unsigned char logBuf[2] = {0, 0};
+    currentSnesFrame = 0;
+    logFrame(logBuf, len, curFrame + 1);
+  } else {
+    if (console == NES) {
+      currentSnesFrame = (inputBuffer[bufferPos] << 8) | 0xFF;
+    } else {
+      currentSnesFrame = (inputBuffer[bufferPos] << 8) | inputBuffer[bufferPos + 1];
+    }
+    logFrame(inputBuffer + bufferPos, len, curFrame + 1);
+  }
+  snesWriteBit();
+  if (readTimer() >= frameDuration) {
+    startTimer();
+    if (haveFrame)
+      advanceBuffer(len);
+  }
+  interrupts();
+}
+
+static void snesClockInterrupt()
+{
+  noInterrupts();
+  snesWriteBit();
+  interrupts();
+}
+
+static void setEEPROM(const String& cmd)
+{
+  // Write terminator first, so we won't overread (by much) if we die early
+  EEPROM.write(cmd.length(), 0);
+  unsigned j = 0;
+  for (unsigned i = 0; i < cmd.length(); i++, j++) {
+    if (cmd[i] == '\\' && cmd[i + 1] == 'n') {
+      EEPROM.write(j, '\n');
+      i++;
+    } else if (cmd[i] == '\\' && cmd[i + 1] == '\\') {
+      EEPROM.write(j, '\\');
+      i++;
+    } else {
+      EEPROM.write(j, cmd[i]);
+    }
+  }
+  EEPROM.write(j, 0);
+}
+
 static void handleCommand(const String& cmd)
 {
   if (cmd.startsWith("M:")) {
@@ -739,8 +943,32 @@ static void handleCommand(const String& cmd)
     setPinMode(cmd.substring(3));
   } else if (cmd.startsWith("DW:")) {
     writePin(cmd.substring(3));
+  } else if (cmd.startsWith("PW:")) {
+    setPower(cmd.substring(3));
+  } else if (cmd.startsWith("SC:")) {
+    setConsole(cmd.substring(3));
+  } else if (cmd.startsWith("WN:")) {
+    setEEPROM(cmd.substring(3));
+  } else if (cmd.startsWith("LO:")) {
+    setLoop(cmd.substring(3));
   } else {
     lockedPrintln("E:Unknown CMD:", cmd.c_str());
+  }
+}
+
+static void handleChar(int newChar)
+{
+  if (newChar == '\n') {
+    if (skippingInput)
+      Serial.println("E:Skipped too-long line");
+    else
+      handleCommand(inputString);
+    inputString = "";
+    skippingInput = false;
+  } else if (inputString.length() > MAX_CMD_LEN) {
+    skippingInput = true;
+  } else {
+    inputString += (char)newChar;
   }
 }
 
@@ -748,20 +976,8 @@ static void inputLoop()
 {
   int newChar;
   int charsRead = 0;
-  while ((newChar = Serial.read()) != -1 && (charsRead++ <= MAX_LOOP_LEN)) {
-    if (newChar == '\n') {
-      if (skippingInput)
-        Serial.println("E:Skipped too-long line");
-      else
-        handleCommand(inputString);
-      inputString = "";
-      skippingInput = false;
-    } else if (inputString.length() > MAX_CMD_LEN) {
-      skippingInput = true;
-    } else {
-      inputString += (char)newChar;
-    }
-  }
+  while ((newChar = Serial.read()) != -1 && (charsRead++ <= MAX_LOOP_LEN))
+    handleChar(newChar);
 }
 
 static void mainLoop()
@@ -777,10 +993,39 @@ static void mainLoop()
   }*/
 }
 
+static void runEEPROM()
+{
+  int i = 0;
+  while (i < 1000) {
+    int c = EEPROM.read(i);
+    if (!c)
+      break;
+    handleChar(c);
+    i++;
+  }
+  if (i)
+    handleChar('\n');
+}
+
 void loop()
 {
-    inputLoop();
-    mainLoop();
+  inputLoop();
+  mainLoop();
+  if (doLoop) {
+    uint64_t curTime = read64Timer();
+    if ((finished && timer64Started && (curTime - finalTime) > (MICRO_BUS_CYCLES * 1000 * 1000 * 30))
+//        || (timer64Started && (curTime - lastFrameTime) > (MICRO_BUS_CYCLES * 1000 * 1000 * 30))
+       ) {
+      setPower("0");
+      while ((read64Timer() - curTime) < (MICRO_BUS_CYCLES * 1000 * 1000 * 2));
+      runEEPROM();
+    }
+  }
+}
+
+static void viInterrupt()
+{
+  viCount++;
 }
 
 void setup()
@@ -788,8 +1033,16 @@ void setup()
   ARM_DEMCR |= ARM_DEMCR_TRCENA;
   ARM_DWT_CTRL |= ARM_DWT_CTRL_CYCCNTENA;
 
+  startTimer();
   Serial.begin(SERIAL_BAUD_RATE);
-  while (!Serial) { ; } // wait for serial port to connect. Needed for native USB port only
+  while (!Serial) {
+    if (readTimer() > MICRO_CYCLES * 5000000) {
+//      doLoop = 1;
+      break;
+    }
+  } // wait for serial port to connect. Needed for native USB port only
+
+  LED_HIGH;
 
   // Status LED
   digitalWrite(STATUS_PIN, LOW);
@@ -798,11 +1051,24 @@ void setup()
   // Configure controller pins
   pinMode(N64_PIN, INPUT_PULLUP);
   digitalWrite(N64_PIN, LOW);
+  pinMode(SNES_LATCH_PIN, INPUT);
+  pinMode(SNES_CLOCK_PIN, INPUT);
+  pinMode(SNES_DATA_PIN, OUTPUT);
+  digitalWrite(SNES_DATA_PIN, LOW);
 
-  attachInterrupt(N64_PIN, n64Interrupt, FALLING);
+  // Power
+  digitalWrite(POWER_PIN, LOW);
+  pinMode(POWER_PIN, OUTPUT);
 
-  // Let the N64 line interrupt anything else
-  NVIC_SET_PRIORITY(IRQ_PORTD, 1);
+  // VI pulse
+  pinMode(VI_PIN, INPUT);
+  attachInterrupt(VI_PIN, viInterrupt, FALLING);
+
+  // Let the controller pins interrupt anything else
+  NVIC_SET_PRIORITY(IRQ_PORTC, 0);
+
+  // Let the VI pin interrupt anything other than controller pins
+//  NVIC_SET_PRIORITY(IRQ_PORTC, 16);
 
   // Initialize SD card
   if (!sd.begin()) {
@@ -815,6 +1081,8 @@ void setup()
   initBuffers();
 
   Serial.println(F("L:Initialization done."));
-}
 
+  if (doLoop)
+    runEEPROM();
+}
 
