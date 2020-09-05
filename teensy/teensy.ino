@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2009 Andrew Brown
- * Copyright (c) 2018 Rodger Combs
+ * Copyright (c) 2018 Ridley Combs
  * 
  * Permission is hereby granted, free of charge, to any person
  * obtaining a copy of this software and associated documentation
