@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017 Rodger Combs
+ * Copyright (c) 2017 rcombs
  *
  * Permission is hereby granted, free of charge, to any person
  * obtaining a copy of this software and associated documentation
