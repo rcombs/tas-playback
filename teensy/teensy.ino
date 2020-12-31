@@ -26,8 +26,6 @@
 #include <SdFatConfig.h>
 #include <MinimumSerial.h>
 #include <SdFat.h>
-#include <BlockDriver.h>
-#include <SysCall.h>
 #include <DMAChannel.h>
 #include <EEPROM.h>
 
@@ -91,7 +89,7 @@ static void updateInputBuffer();
 static bool hold = false;
 static bool finished = false;
 
-static FatFile tasFile;
+static SdFile tasFile;
 
 //static unsigned int progressPos = 0;
 static unsigned long numFrames = 0, curFrame = 0;
@@ -99,7 +97,7 @@ static int edgesRead = 0;
 static int incompleteCommand = 0;
 static volatile unsigned long viCount = 0;
 
-static SdFatSdioEX sd;
+static SdFs sd;
 
 static uint16_t currentSnesFrame;
 
@@ -243,13 +241,13 @@ static size_t appendInputs(const String& data)
 
 static void emitList(const String& path)
 {
-  FatFile dir;
+  SdFile dir;
   if (!dir.open(&sd, path.c_str(), O_READ)) {
     Serial.println(F("E:Failed to open requested directory"));
     return;
   }
   dir.rewind();
-  FatFile listFile;
+  SdFile listFile;
   while (listFile.openNext(&dir)) {
     char name[256];
     listFile.getName(name, sizeof(name));
@@ -398,10 +396,10 @@ String hextobin(const String& hex)
   return ret;
 }
 
-static FatFile writeFile;
+static SdFile writeFile;
 
 static void appendData(const String& data) {
-  if (writeFile.write(data.c_str(), data.length()) == (int)data.length())
+  if (writeFile.write(data.c_str(), data.length()) == data.length())
     Serial.println("AP:OK");
   else
     Serial.println("AP:NAK");
@@ -1085,4 +1083,3 @@ void setup()
   if (doLoop)
     runEEPROM();
 }
-
