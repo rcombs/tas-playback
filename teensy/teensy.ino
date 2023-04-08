@@ -108,6 +108,11 @@ static uint64_t finalTime = 0;
 static uint64_t lastFrameTime = 0;
 static int doLoop = 0;
 
+#define N_SER_BUFS 16
+#define SER_BUF_SIZE 1024
+static char serBuffer[N_SER_BUFS][SER_BUF_SIZE] = {0};
+static volatile bool bufHasData[N_SER_BUFS] = {0};
+
 template<class T> void lockedPrintln(const T& input)
 {
   noInterrupts();
@@ -260,17 +265,24 @@ static void emitList(const String& path)
 
 void logFrame(const unsigned char *dat, size_t count, size_t num)
 {
-  Serial.write("F:");
-  Serial.print(num);
-  Serial.print(" ");
-  Serial.print(read64Timer() / (double)(MICRO_BUS_CYCLES * 1000 * 1000), 6);
-  Serial.print(" ");
-  Serial.print(viCount);
-  for (size_t i = 0; i < count; i++) {
-    Serial.write(" ");
-    Serial.print(dat[i], HEX);
+  static bool overflowed = 0;
+  int i;
+  for (i = 0; i < N_SER_BUFS && bufHasData[i]; i++);
+  if (i >= N_SER_BUFS) {
+    overflowed = 1;
+    return;
   }
-  Serial.print("\n");
+
+  char* buf = &serBuffer[i][0];
+  int size = SER_BUF_SIZE - 1;
+  int pos = snprintf(buf, size, "F:%u %f %lu", num,
+                     (read64Timer() / (double)(MICRO_BUS_CYCLES * 1000 * 1000)),
+                     viCount);
+  for (size_t i = 0; i < count; i++)
+    pos += snprintf(buf + pos, size - pos, " %hhx", dat[i]);
+  snprintf(buf + pos, size - pos, " %lu %i %s", numFrames, overflowed, filePath.c_str());
+  bufHasData[i] = 1;
+  overflowed = 0;
 }
 
 static bool setPinMode(const String& cmd)
@@ -1021,6 +1033,30 @@ void loop()
       runEEPROM();
     }
   }
+
+  bool first = true;
+  bool gotData = false;
+  do {
+    int i = 0;
+    gotData = false;
+    if (first) {
+      for (; i < N_SER_BUFS; i++) {
+        if (!bufHasData[i])
+          break;
+        else
+          gotData = true;
+      }
+    }
+    first = false;
+    for (; i < N_SER_BUFS; i++) {
+      if (bufHasData[i]) {
+        Serial.println(&serBuffer[i][0]);
+        bufHasData[i] = 0;
+        Serial.flush();
+        gotData = true;
+      }
+    }
+  } while (gotData);
 }
 
 static void viInterrupt()
