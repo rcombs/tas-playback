@@ -1107,7 +1107,7 @@ void setup()
 //  NVIC_SET_PRIORITY(IRQ_PORTC, 16);
 
   // Initialize SD card
-  if (!sd.begin()) {
+  if (!sd.begin(BUILTIN_SDCARD)) {
     Serial.println(F("E:SD initialization failed!"));
     return;
   }
