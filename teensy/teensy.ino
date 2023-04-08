@@ -92,6 +92,7 @@ static bool finished = false;
 static SdFile tasFile;
 
 //static unsigned int progressPos = 0;
+static String filePath;
 static unsigned long numFrames = 0, curFrame = 0;
 static int edgesRead = 0;
 static int incompleteCommand = 0;
@@ -514,6 +515,7 @@ static bool openTAS(const String& path) {
     curFrame = 0;
     numFrames = newNumFrames;
     console = N64;
+    filePath = path;
     interrupts();
 
     setupConsole();
