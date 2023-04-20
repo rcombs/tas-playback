@@ -40,6 +40,7 @@
 #define POWER_PIN 32
 #define VI_PIN 35
 #define FIELD_PIN 36
+#define HAVE_EEPROM
 #define HAVE_GPIO_COMMANDS
 
 #define SERIAL_BAUD_RATE 115200
@@ -926,6 +927,7 @@ static void snesClockInterrupt()
 }
 #endif
 
+#ifdef HAVE_EEPROM
 static void setEEPROM(const String& cmd)
 {
   // Write terminator first, so we won't overread (by much) if we die early
@@ -944,6 +946,7 @@ static void setEEPROM(const String& cmd)
   }
   EEPROM.write(j, 0);
 }
+#endif
 
 static void handleCommand(const String& cmd)
 {
@@ -986,8 +989,10 @@ static void handleCommand(const String& cmd)
 #endif
   } else if (cmd.startsWith("SC:")) {
     setConsole(cmd.substring(3));
+#ifdef HAVE_EEPROM
   } else if (cmd.startsWith("WN:")) {
     setEEPROM(cmd.substring(3));
+#endif
   } else if (cmd.startsWith("LO:")) {
     setLoop(cmd.substring(3));
   } else {
@@ -1032,6 +1037,7 @@ static void mainLoop()
   }*/
 }
 
+#ifdef HAVE_EEPROM
 static void runEEPROM()
 {
   int i = 0;
@@ -1045,11 +1051,13 @@ static void runEEPROM()
   if (i)
     handleChar('\n');
 }
+#endif
 
 void loop()
 {
   inputLoop();
   mainLoop();
+#ifdef HAVE_EEPROM
   if (doLoop) {
     uint64_t curTime = read64Timer();
     if ((finished && timer64Started && (curTime - finalTime) > (MICRO_BUS_CYCLES * 1000 * 1000 * 30))
@@ -1060,6 +1068,7 @@ void loop()
       runEEPROM();
     }
   }
+#endif
 
   bool first = true;
   bool gotData = false;
@@ -1167,6 +1176,8 @@ void setup()
 
   Serial.println(F("L:Initialization done."));
 
+#ifdef HAVE_EEPROM
   if (doLoop)
     runEEPROM();
+#endif
 }
