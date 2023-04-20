@@ -54,6 +54,8 @@
 
 #define LED_HIGH (CORE_PIN13_PORTSET = CORE_PIN13_BITMASK) //digitalWriteFast(STATUS_PIN, HIGH)
 #define LED_LOW (CORE_PIN13_PORTCLEAR = CORE_PIN13_BITMASK) //digitalWriteFast(STATUS_PIN, LOW)
+
+#define SERIAL_TIMEOUT_US 5000000
 #endif
 
 #define INPUT_BUFFER_SIZE 2048 // Multiples of 512 are ideal since we can read 256*4/2 = 512 bytes at once.
@@ -1076,12 +1078,15 @@ void setup()
 
   startTimer();
   Serial.begin(SERIAL_BAUD_RATE);
+
+#ifdef SERIAL_TIMEOUT_US
   while (!Serial) {
-    if (readTimer() > MICRO_CYCLES * 5000000) {
+    if (readTimer() > MICRO_CYCLES * SERIAL_TIMEOUT_US) {
 //      doLoop = 1;
       break;
     }
   } // wait for serial port to connect. Needed for native USB port only
+#endif
 
   LED_HIGH;
 
