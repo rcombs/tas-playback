@@ -117,6 +117,8 @@ static String filename;
 static unsigned long numFrames = 0, curFrame = 0;
 static int edgesRead = 0;
 static int incompleteCommand = 0;
+static int firstEdgeTime = 0;
+static int secondEdgeTime = 0;
 static volatile unsigned long viCount = 0;
 
 static SdFs sd;
@@ -724,10 +726,14 @@ static void get_n64_command()
         while (!N64_QUERY)
           FAIL_TIMEOUT;
         long lowTime = readAndResetTimer();
+        if (!edgesRead)
+            firstEdgeTime = lowTime;
         edgesRead++;
         while (N64_QUERY)
           FAIL_TIMEOUT;
         long highTime = readAndResetTimer();
+        if (edgesRead == 1)
+            secondEdgeTime = highTime;
         edgesRead++;
         char bit =
 #ifdef USE_COMPARE_ABSOLUTE
@@ -923,28 +929,18 @@ static void n64Interrupt()
         case -1:
             if (finished)
               break;
-            Serial.print(F("W:Read timeout; "));
-            Serial.print(edgesRead);
-            Serial.println(F(" edges read"));
-            if (edgesRead >= 2) {
-              Serial.print(F("W: partial byte: "));
-              Serial.println(incompleteCommand, HEX);
-            }
-            Serial.print(F("W:"));
-            Serial.print(ticksSinceLast);
-            Serial.println(F(" cycles since last"));
+            logFromISR("W:RTO; %d read; b:%02hhx; %d since; %d/%d to 1/2", edgesRead, incompleteCommand, ticksSinceLast, firstEdgeTime, secondEdgeTime);
             if (curFrame > 100)
-              Serial.println(F("D:timeout"));
+              logFromISR("D:timeout");
             waitForIdle(1000);
             break;
 
         default:
             if (finished)
               break;
-            Serial.print(F("W:Unknown command: 0x"));
-            Serial.println(n64_command, HEX);
+            logFromISR("W:Unknown; %d read; b:%02hhx; %d since; %d/%d to 1/2", edgesRead, n64_command, ticksSinceLast, firstEdgeTime, secondEdgeTime);
             if (curFrame > 100)
-              Serial.println(F("D:inval"));
+              logFromISR("D:inval");
             waitForIdle(1000);
             break;
     }
