@@ -62,7 +62,9 @@
 #define INPUT_BUFFER_UPDATE_TIMEOUT 10 // 10 ms
 
 #define MICRO_CYCLES (F_CPU / 1000000)
+#ifdef F_BUS
 #define MICRO_BUS_CYCLES (F_BUS / 1000000ULL)
+#endif
 
 #define MAX_CMD_LEN 4096
 #define MAX_LOOP_LEN 10240
