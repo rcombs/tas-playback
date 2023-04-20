@@ -58,6 +58,13 @@
 #define LED_LOW (CORE_PIN13_PORTCLEAR = CORE_PIN13_BITMASK) //digitalWriteFast(STATUS_PIN, LOW)
 
 #define SERIAL_TIMEOUT_US 5000000
+
+#define DISABLE_N64_INTERRUPT() \
+  volatile uint32_t *config = portConfigRegister(N64_PIN); \
+  uint32_t oldConfig = *config; \
+  *config &= ~0x000F0000;
+#define ENABLE_N64_INTERRUPT() \
+  *config = oldConfig;
 #endif
 
 #define INPUT_BUFFER_SIZE 2048 // Multiples of 512 are ideal since we can read 256*4/2 = 512 bytes at once.
@@ -721,12 +728,11 @@ static void n64Interrupt()
 
     unsigned char data, addr;
     int ticksSinceLast = readAndResetTimer();
-    volatile uint32_t *config = portConfigRegister(N64_PIN);
-    uint32_t oldConfig = *config;
     bool haveFrame;
-//    unsigned int curPos;
 
-    *config &= ~0x000F0000;
+#ifdef DISABLE_N64_INTERRUPT
+    DISABLE_N64_INTERRUPT();
+#endif
 
     // Wait for incoming 64 command
     // this will block until the N64 sends us a command
@@ -888,7 +894,9 @@ static void n64Interrupt()
             break;
     }
 
-    *config = oldConfig;
+#ifdef ENABLE_N64_INTERRUPT
+    ENABLE_N64_INTERRUPT();
+#endif
 
     interrupts();
 }
