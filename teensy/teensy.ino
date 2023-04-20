@@ -29,6 +29,11 @@
 #include <DMAChannel.h>
 #include <EEPROM.h>
 
+#ifndef PIT_LTMR64H
+#define PIT_LTMR64H             (*(volatile uint32_t *)0x400370E0) // PIT Upper Lifetime Timer Register
+#define PIT_LTMR64L             (*(volatile uint32_t *)0x400370E4) // PIT Lower Lifetime Timer Register
+#endif
+
 #define STATUS_PIN 13
 #define POWER_PIN 32
 #define VI_PIN 35
@@ -164,11 +169,6 @@ static uint64_t read64Timer()
 {
   if (!timer64Started)
     return 0;
-  
-#ifndef PIT_LTMR64H
-#define PIT_LTMR64H             (*(volatile uint32_t *)0x400370E0) // PIT Upper Lifetime Timer Register
-#define PIT_LTMR64L             (*(volatile uint32_t *)0x400370E4) // PIT Lower Lifetime Timer Register
-#endif
 
   uint64_t current_uptime = (uint64_t)PIT_LTMR64H << 32;
   current_uptime = current_uptime + PIT_LTMR64L;
