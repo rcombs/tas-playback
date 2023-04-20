@@ -40,6 +40,7 @@
 #define POWER_PIN 32
 #define VI_PIN 35
 #define FIELD_PIN 36
+#define HAVE_GPIO_COMMANDS
 
 #define SERIAL_BAUD_RATE 115200
 
@@ -295,6 +296,7 @@ void logFrame(const unsigned char *dat, size_t count, size_t num)
   overflowed = 0;
 }
 
+#ifdef HAVE_GPIO_COMMANDS
 static bool setPinMode(const String& cmd)
 {
   if (cmd.length() < 3)
@@ -336,6 +338,7 @@ static bool writePin(const String& cmd)
 
   return true;
 }
+#endif
 
 static bool setPower(const String& cmd)
 {
@@ -965,10 +968,12 @@ static void handleCommand(const String& cmd)
   } else if (cmd.startsWith("CL:")) {
     writeFile.close();
     lockedPrintln("CL:OK");
+#ifdef HAVE_GPIO_COMMANDS
   } else if (cmd.startsWith("PM:")) {
     setPinMode(cmd.substring(3));
   } else if (cmd.startsWith("DW:")) {
     writePin(cmd.substring(3));
+#endif
   } else if (cmd.startsWith("PW:")) {
     setPower(cmd.substring(3));
   } else if (cmd.startsWith("SC:")) {
