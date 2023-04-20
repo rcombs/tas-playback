@@ -1095,8 +1095,12 @@ static void viInterrupt()
 
 void setup()
 {
+#ifdef ARM_DEMCR
   ARM_DEMCR |= ARM_DEMCR_TRCENA;
+#endif
+#ifdef ARM_DWT_CTRL
   ARM_DWT_CTRL |= ARM_DWT_CTRL_CYCCNTENA;
+#endif
 
   startTimer();
   Serial.begin(SERIAL_BAUD_RATE);
