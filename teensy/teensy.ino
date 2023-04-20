@@ -113,7 +113,7 @@ static bool finished = false;
 static SdFile tasFile;
 
 //static unsigned int progressPos = 0;
-static String filePath;
+static String filename;
 static unsigned long numFrames = 0, curFrame = 0;
 static int edgesRead = 0;
 static int incompleteCommand = 0;
@@ -228,6 +228,33 @@ void initBuffers()
   bufferHasData = false;
 }
 
+static bool overflowed = 0;
+
+void logFromISR(const char *fmt, ...)
+{
+  int i;
+  for (i = 0; i < N_SER_BUFS && bufHasData[i]; i++);
+  if (i >= N_SER_BUFS) {
+    overflowed = 1;
+    return;
+  }
+
+  char* buf = &serBuffer[i][0];
+  size_t size = SER_BUF_SIZE - 1;
+
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(buf, size, fmt, ap);
+  va_end(ap);
+
+  bufHasData[i] = 1;
+  overflowed = 0;
+
+#ifdef ISR_LOG_CB
+  ISR_LOG_CB();
+#endif
+}
+
 static void advanceBuffer(long bytes)
 {
   curFrame++;
@@ -297,24 +324,32 @@ static void emitList(const String& path)
 
 void logFrame(const unsigned char *dat, size_t count, size_t num)
 {
-  static bool overflowed = 0;
-  int i;
-  for (i = 0; i < N_SER_BUFS && bufHasData[i]; i++);
-  if (i >= N_SER_BUFS) {
-    overflowed = 1;
-    return;
-  }
+#define LOG_FRAME_START "F:%u %f %lu"
+#define LOG_FRAME_BYTE  " %hhx"
+#define LOG_FRAME_END   " %lu %i %s"
 
-  char* buf = &serBuffer[i][0];
-  int size = SER_BUF_SIZE - 1;
-  int pos = snprintf(buf, size, "F:%u %f %lu", num,
-                     (read64Timer() / (double)(MICRO_BUS_CYCLES * 1000 * 1000)),
-                     viCount);
-  for (size_t i = 0; i < count; i++)
-    pos += snprintf(buf + pos, size - pos, " %hhx", dat[i]);
-  snprintf(buf + pos, size - pos, " %lu %i %s", numFrames, overflowed, filePath.c_str());
-  bufHasData[i] = 1;
-  overflowed = 0;
+#ifdef PIT_LTMR64H
+#define LOG_TIME (read64Timer() / (double)(MICRO_BUS_CYCLES * 1000 * 1000))
+#else
+#define LOG_TIME (double)0.
+#endif
+
+#define LOG_FRAME_START_ARGS num, LOG_TIME, viCount
+#define LOG_FRAME_END_ARGS numFrames, overflowed, filename.c_str()
+
+  if (count == 4)
+    logFromISR(LOG_FRAME_START LOG_FRAME_BYTE LOG_FRAME_BYTE LOG_FRAME_BYTE LOG_FRAME_BYTE LOG_FRAME_END,
+               LOG_FRAME_START_ARGS, dat[0], dat[1], dat[2], dat[3], LOG_FRAME_END_ARGS);
+  else if (count == 2)
+    logFromISR(LOG_FRAME_START LOG_FRAME_BYTE LOG_FRAME_BYTE LOG_FRAME_END,
+               LOG_FRAME_START_ARGS, dat[0], dat[1], LOG_FRAME_END_ARGS);
+  else if (count == 1)
+    logFromISR(LOG_FRAME_START LOG_FRAME_BYTE LOG_FRAME_END,
+               LOG_FRAME_START_ARGS, dat[0], LOG_FRAME_END_ARGS);
+
+#ifdef FRAME_CB
+  FRAME_CB(dat, count);
+#endif
 }
 
 #ifdef HAVE_GPIO_COMMANDS
@@ -471,6 +506,14 @@ static void waitForIdle(unsigned us)
   LED_LOW;
 }
 
+static String basename(const String& path) {
+  int pos = path.lastIndexOf('/');
+  if (pos < 0)
+    return path;
+
+  return path.substring(pos + 1);
+}
+
 static bool openTAS(const String& path) {
     char signature[4];
     int version;
@@ -567,7 +610,7 @@ static bool openTAS(const String& path) {
     curFrame = 0;
     numFrames = newNumFrames;
     console = N64;
-    filePath = path;
+    filename = basename(path);
     interrupts();
 
     setupConsole();
