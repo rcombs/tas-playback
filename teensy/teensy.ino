@@ -122,7 +122,7 @@ static uint64_t lastFrameTime = 0;
 static int doLoop = 0;
 
 #define N_SER_BUFS 16
-#define SER_BUF_SIZE 1024
+#define SER_BUF_SIZE 256
 static char serBuffer[N_SER_BUFS][SER_BUF_SIZE] = {0};
 static volatile bool bufHasData[N_SER_BUFS] = {0};
 
