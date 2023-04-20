@@ -37,3 +37,6 @@ serial
 build-*
 
 .DS_Store
+
+.vscode
+dist
