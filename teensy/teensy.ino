@@ -155,6 +155,7 @@ static uint32_t readTimer()
   return ARM_DWT_CYCCNT;
 }
 
+#ifdef PIT_LTMR64H
 static bool timer64Started = false;
 
 static void start64Timer()
@@ -186,6 +187,7 @@ static uint64_t read64Timer()
   current_uptime = current_uptime + PIT_LTMR64L;
   return 0xffffffffffffffffull - current_uptime;
 }
+#endif
 
 
 static size_t getNextRegion(size_t& size) {
@@ -214,8 +216,10 @@ static void advanceBuffer(long bytes)
 {
   curFrame++;
 
+#ifdef PIT_LTMR64H
   lastFrameTime = read64Timer();
-            
+#endif
+
   if (curFrame == numFrames) {
     lockedPrintln("C:", lastFrameTime / (double)(MICRO_BUS_CYCLES * 1000 * 1000));
     finished = true;
@@ -747,7 +751,9 @@ static void n64Interrupt()
             Serial.print("P:");
             Serial.println(viCount);
             viCount = 0;
+#ifdef PIT_LTMR64H
             start64Timer();
+#endif
             break;
         case 0x01:
             haveFrame = (!finished && bufferHasData);
