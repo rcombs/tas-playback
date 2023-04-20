@@ -1113,8 +1113,10 @@ void setup()
   LED_HIGH;
 
   // Status LED
+#ifdef STATUS_PIN
   digitalWrite(STATUS_PIN, LOW);
   pinMode(STATUS_PIN, OUTPUT);
+#endif
 
   // Configure controller pins
 #ifdef N64_PIN
