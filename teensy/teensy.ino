@@ -112,9 +112,10 @@ static volatile unsigned long viCount = 0;
 
 static SdFs sd;
 
+#ifdef SNES_DATA_PIN
 static uint16_t currentSnesFrame;
-
 static uint32_t frameDuration = 0;
+#endif
 
 static uint64_t finalTime = 0;
 static uint64_t lastFrameTime = 0;
@@ -373,8 +374,10 @@ void setupConsole()
   if (console == N64) {
     attachInterrupt(N64_PIN, n64Interrupt, FALLING);
   } else if (console == NES || console == SNES) {
+#ifdef SNES_LATCH_PIN
     attachInterrupt(SNES_LATCH_PIN, snesLatchInterrupt, RISING);
     attachInterrupt(SNES_CLOCK_PIN, snesClockInterrupt, RISING);
+#endif
   }
 }
 
@@ -866,6 +869,7 @@ static void n64Interrupt()
     interrupts();
 }
 
+#ifdef SNES_DATA_PIN
 static void snesWriteBit()
 {
   digitalWrite(SNES_DATA_PIN, (currentSnesFrame & 0x8000) ? LOW : HIGH);
@@ -909,6 +913,7 @@ static void snesClockInterrupt()
   snesWriteBit();
   interrupts();
 }
+#endif
 
 static void setEEPROM(const String& cmd)
 {
@@ -1097,10 +1102,13 @@ void setup()
   // Configure controller pins
   pinMode(N64_PIN, INPUT_PULLUP);
   digitalWrite(N64_PIN, LOW);
+
+#ifdef SNES_LATCH_PIN
   pinMode(SNES_LATCH_PIN, INPUT);
   pinMode(SNES_CLOCK_PIN, INPUT);
   pinMode(SNES_DATA_PIN, OUTPUT);
   digitalWrite(SNES_DATA_PIN, LOW);
+#endif
 
   // Power
   digitalWrite(POWER_PIN, LOW);
