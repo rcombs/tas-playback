@@ -340,6 +340,7 @@ static bool writePin(const String& cmd)
 }
 #endif
 
+#ifdef POWER_PIN
 static bool setPower(const String& cmd)
 {
   if (cmd.length() < 1)
@@ -357,6 +358,7 @@ static bool setPower(const String& cmd)
 
   return true;
 }
+#endif
 
 static bool setLoop(const String& cmd)
 {
@@ -549,9 +551,11 @@ static bool openTAS(const String& path) {
 
     setupConsole();
 
+#ifdef POWER_PIN
     if (doLoop)
       setPower("1");
- 
+#endif
+
     return true;
 }
 
@@ -976,8 +980,10 @@ static void handleCommand(const String& cmd)
   } else if (cmd.startsWith("DW:")) {
     writePin(cmd.substring(3));
 #endif
+#ifdef POWER_PIN
   } else if (cmd.startsWith("PW:")) {
     setPower(cmd.substring(3));
+#endif
   } else if (cmd.startsWith("SC:")) {
     setConsole(cmd.substring(3));
   } else if (cmd.startsWith("WN:")) {
@@ -1122,8 +1128,10 @@ void setup()
 #endif
 
   // Power
+#ifdef POWER_PIN
   digitalWrite(POWER_PIN, LOW);
   pinMode(POWER_PIN, OUTPUT);
+#endif
 
   // VI pulse
   pinMode(VI_PIN, INPUT);
