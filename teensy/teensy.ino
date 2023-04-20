@@ -157,6 +157,11 @@ static uint32_t readTimer()
   return ARM_DWT_CYCCNT;
 }
 
+static uint32_t readAndResetTimer()
+{
+  return __atomic_exchange_n(&ARM_DWT_CYCCNT, 0, __ATOMIC_SEQ_CST);
+}
+
 #endif
 
 #ifdef PIT_LTMR64H
@@ -662,13 +667,11 @@ static void get_n64_command()
     for (int i = 1; i <= bitcount; i++) {
         while (!N64_QUERY)
           FAIL_TIMEOUT;
-        long lowTime = readTimer();
-        startTimer();
+        long lowTime = readAndResetTimer();
         edgesRead++;
         while (N64_QUERY)
           FAIL_TIMEOUT;
-        long highTime = readTimer();
-        startTimer();
+        long highTime = readAndResetTimer();
         edgesRead++;
         char bit = (lowTime < highTime);
         newByte <<= 1;
@@ -717,8 +720,7 @@ static void n64Interrupt()
     noInterrupts();
 
     unsigned char data, addr;
-    int ticksSinceLast = readTimer();
-    startTimer();
+    int ticksSinceLast = readAndResetTimer();
     volatile uint32_t *config = portConfigRegister(N64_PIN);
     uint32_t oldConfig = *config;
     bool haveFrame;
