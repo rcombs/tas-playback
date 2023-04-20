@@ -264,7 +264,13 @@ static void advanceBuffer(long bytes)
 #endif
 
   if (curFrame == numFrames) {
-    lockedPrintln("C:", lastFrameTime / (double)(MICRO_BUS_CYCLES * 1000 * 1000));
+    logFromISR("C:%f",
+#ifdef MICRO_BUS_CYCLES
+        lastFrameTime / (double)(MICRO_BUS_CYCLES * 1000 * 1000)
+#else
+        double(0.)
+#endif
+    );
     finished = true;
     finalTime = lastFrameTime;
   }
