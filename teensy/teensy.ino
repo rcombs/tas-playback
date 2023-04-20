@@ -1106,6 +1106,9 @@ void loop()
     first = false;
     for (; i < N_SER_BUFS; i++) {
       if (bufHasData[i]) {
+#ifdef LOG_CB
+        LOG_CB(&serBuffer[i][0]);
+#endif
         Serial.println(&serBuffer[i][0]);
         bufHasData[i] = 0;
         Serial.flush();
