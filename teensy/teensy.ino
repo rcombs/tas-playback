@@ -23,6 +23,8 @@
  */
 
 #include "crc_table.h"
+
+#ifdef TEENSYDUINO
 #include <SdFatConfig.h>
 #include <MinimumSerial.h>
 #include <SdFat.h>
@@ -52,6 +54,7 @@
 
 #define LED_HIGH (CORE_PIN13_PORTSET = CORE_PIN13_BITMASK) //digitalWriteFast(STATUS_PIN, HIGH)
 #define LED_LOW (CORE_PIN13_PORTCLEAR = CORE_PIN13_BITMASK) //digitalWriteFast(STATUS_PIN, LOW)
+#endif
 
 #define INPUT_BUFFER_SIZE 2048 // Multiples of 512 are ideal since we can read 256*4/2 = 512 bytes at once.
 // 512 bytes is an optimization for reading the sd card and skips using another buffer.
