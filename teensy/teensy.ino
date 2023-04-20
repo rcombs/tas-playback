@@ -821,8 +821,7 @@ static void n64Interrupt()
             output_buffer[2] = 0x01;
 
             n64_send(output_buffer, 3, 1);
-            Serial.print("P:");
-            Serial.println(viCount);
+            logFromISR("P:%ld", viCount);
             viCount = 0;
 #ifdef PIT_LTMR64H
             start64Timer();
@@ -875,7 +874,7 @@ static void n64Interrupt()
             output_buffer[32] = 0xB8; // CRC
 
             n64_send(output_buffer, 33, 1);
-            Serial.println(F("L:Got a read, what?"));
+            logFromISR("L:Got a read, what?");
 
             //Serial.println("It was 0x02: the read command");
             break;
@@ -903,7 +902,7 @@ static void n64Interrupt()
 
             // send it
             n64_send(output_buffer, 1, 1);
-            Serial.println(F("L:Got a write, what?"));
+            logFromISR("L:Got a write, what?");
 
             // end of time critical code
             // was the address the rumble latch at 0xC000?
