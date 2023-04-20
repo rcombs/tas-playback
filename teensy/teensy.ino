@@ -1,7 +1,7 @@
 /*
  * Copyright (c) 2009 Andrew Brown
  * Copyright (c) 2018 rcombs
- * 
+ *
  * Permission is hereby granted, free of charge, to any person
  * obtaining a copy of this software and associated documentation
  * files (the "Software"), to deal in the Software without
@@ -528,7 +528,7 @@ static bool openTAS(const String& path) {
 
     Serial.write("M:");
     Serial.println(path);
-  
+
     // Open the file for reading:
     Serial.print(F("L:Opening file '"));
     Serial.print(path);
@@ -538,27 +538,27 @@ static bool openTAS(const String& path) {
 
     if (tasFile.isOpen())
       tasFile.close();
-  
+
     // Error check
     if (!tasFile.open(&sd, path.c_str(), O_READ)) {
         Serial.println(F("E:Error in opening file"));
         return false;
     }
-  
+
     // Open header
     if (tasFile.read(signature, 4) != 4 || tasFile.read(&version, 4) != 4) {
         tasFile.close();
         Serial.println(F("E:Failed to read signature"));
         return false;
     }
-  
+
     // Validate file signature
     if (memcmp(signature, "M64\x1A", 4) != 0) {
         Serial.println(F("E:m64 signature invalid"));
         tasFile.close();
         return false;
     }
-      
+
     // Print version
     Serial.print(F("L:M64 Version: "));
     Serial.println(version);
@@ -566,7 +566,7 @@ static bool openTAS(const String& path) {
     Serial.flush();
 
     tasFile.seekSet(0x018);
-  
+
     // Open header
     uint32_t newNumFrames;
     if (tasFile.read(&newNumFrames, 4) != 4) {
@@ -574,7 +574,7 @@ static bool openTAS(const String& path) {
         Serial.println(F("E:Failed to read frame count"));
         return false;
     }
-  
+
     // Get header size
     switch(version) {
         case 1:
@@ -590,7 +590,7 @@ static bool openTAS(const String& path) {
             tasFile.close();
             return false;
     }
-  
+
     // Final check
     if (!tasFile.available()) {
         Serial.println(F("E:No input data found in file"));
@@ -634,7 +634,7 @@ static bool openTAS(const String& path) {
 static void updateInputBuffer() {
     if (finished || !tasFile.isOpen())
       return;
-  
+
     // Check for file end
     if (!tasFile.available()) {
         tasFile.close();
@@ -834,7 +834,7 @@ static void n64Interrupt()
               memcpy(output_buffer, inputBuffer + bufferPos, 4);
             else
               memset(output_buffer, 0, 4);
-        
+
             // blast out the pre-assembled array in output_buffer
             n64_send(output_buffer, 4, 1);
 
@@ -1097,7 +1097,7 @@ static void inputLoop()
 static void mainLoop()
 {
   updateInputBuffer();
-  
+
   // Record if it took longer than expected
   /*updateTime = readTimer();
   if (updateTime > 1000 * MICRO_CYCLES) {
