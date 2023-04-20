@@ -1148,7 +1148,9 @@ void setup()
 #endif
 
   // Let the controller pins interrupt anything else
+#ifdef IRQ_PORTC
   NVIC_SET_PRIORITY(IRQ_PORTC, 0);
+#endif
 
   // Let the VI pin interrupt anything other than controller pins
 //  NVIC_SET_PRIORITY(IRQ_PORTC, 16);
