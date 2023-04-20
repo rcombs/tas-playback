@@ -145,6 +145,8 @@ template<class A, class B> void lockedPrintln(const A& a, const B& b)
   interrupts();
 }
 
+#ifdef ARM_DWT_CYCCNT
+
 static void startTimer()
 {
   ARM_DWT_CYCCNT = 0;
@@ -154,6 +156,8 @@ static uint32_t readTimer()
 {
   return ARM_DWT_CYCCNT;
 }
+
+#endif
 
 #ifdef PIT_LTMR64H
 static bool timer64Started = false;
