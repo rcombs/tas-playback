@@ -377,7 +377,9 @@ static bool setLoop(const String& cmd)
 void setupConsole()
 {
   if (console == N64) {
+#ifdef N64_PIN
     attachInterrupt(N64_PIN, n64Interrupt, FALLING);
+#endif
   } else if (console == NES || console == SNES) {
 #ifdef SNES_LATCH_PIN
     attachInterrupt(SNES_LATCH_PIN, snesLatchInterrupt, RISING);
@@ -1107,8 +1109,10 @@ void setup()
   pinMode(STATUS_PIN, OUTPUT);
 
   // Configure controller pins
+#ifdef N64_PIN
   pinMode(N64_PIN, INPUT_PULLUP);
   digitalWrite(N64_PIN, LOW);
+#endif
 
 #ifdef SNES_LATCH_PIN
   pinMode(SNES_LATCH_PIN, INPUT);
