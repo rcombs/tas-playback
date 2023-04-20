@@ -680,7 +680,13 @@ static void get_n64_command()
           FAIL_TIMEOUT;
         long highTime = readAndResetTimer();
         edgesRead++;
-        char bit = (lowTime < highTime);
+        char bit =
+#ifdef USE_COMPARE_ABSOLUTE
+            (highTime >= MICRO_CYCLES * 2)
+#else
+            (lowTime < highTime)
+#endif
+        ;
         newByte <<= 1;
         newByte |= bit;
 
