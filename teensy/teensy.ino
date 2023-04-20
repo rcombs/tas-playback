@@ -126,6 +126,8 @@ static int doLoop = 0;
 static char serBuffer[N_SER_BUFS][SER_BUF_SIZE] = {0};
 static volatile bool bufHasData[N_SER_BUFS] = {0};
 
+static void n64Interrupt();
+
 template<class T> void lockedPrintln(const T& input)
 {
   noInterrupts();
