@@ -1086,10 +1086,12 @@ void loop()
   } while (gotData);
 }
 
+#ifdef VI_PIN
 static void viInterrupt()
 {
   viCount++;
 }
+#endif
 
 void setup()
 {
@@ -1134,8 +1136,10 @@ void setup()
 #endif
 
   // VI pulse
+#ifdef VI_PIN
   pinMode(VI_PIN, INPUT);
   attachInterrupt(VI_PIN, viInterrupt, FALLING);
+#endif
 
   // Let the controller pins interrupt anything else
   NVIC_SET_PRIORITY(IRQ_PORTC, 0);
