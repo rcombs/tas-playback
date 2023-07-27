@@ -1189,6 +1189,18 @@ static void viInterrupt()
 }
 #endif
 
+void printSDError(const char* msg) {
+  (void)msg;
+  if (sd.sdErrorCode()) {
+    if (sd.sdErrorCode() == SD_CARD_ERROR_ACMD41) {
+      Serial.println("Try power cycling the SD card.");
+    }
+    printSdErrorSymbol(&Serial, sd.sdErrorCode());
+    Serial.print(", ErrorData: 0X");
+    Serial.println(sd.sdErrorData(), HEX);
+  }
+}
+
 void setup()
 {
 #ifdef ARM_DEMCR
@@ -1265,6 +1277,7 @@ void setup()
 
   // Initialize SD card
   if (!sd.begin(SD_CONFIG)) {
+    printSDError("init");
     Serial.println(F("E:SD initialization failed!"));
     return;
   }

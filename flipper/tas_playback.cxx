@@ -24,6 +24,8 @@ typedef enum {
   O_TRUNC  = ((uint16_t)FSOM_CREATE_ALWAYS << 8),
 } FileOpenMode;
 
+#define SD_CARD_ERROR_ACMD41 0x16
+
 class SdFs {
 public:
   bool begin(int)
@@ -44,11 +46,16 @@ public:
       furi_record_close(RECORD_STORAGE);
   }
 
+  uint8_t sdErrorCode() const { return 0; }
+  uint8_t sdErrorData() const { return 0; }
+
 private:
   Storage* m_storage = nullptr;
 
   friend class SdFile;
 };
+
+template<class T> static inline void printSdErrorSymbol(T*, uint8_t) {}
 
 class SdFile {
 public:
