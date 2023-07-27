@@ -1199,15 +1199,23 @@ void setup()
 #endif
 
   startTimer();
+
+#ifdef SERIAL_TIMEOUT_US
+  while (readTimer() > MICRO_CYCLES * 1000 * 1000);
+#endif
+
   Serial.begin(SERIAL_BAUD_RATE);
 
 #ifdef SERIAL_TIMEOUT_US
   while (!Serial) {
     if (readTimer() > MICRO_CYCLES * SERIAL_TIMEOUT_US) {
-//      doLoop = 1;
+      doLoop = 1;
       break;
     }
   } // wait for serial port to connect. Needed for native USB port only
+
+  Serial.print(F("L:Serial init timer exited: doLoop="));
+  Serial.println(doLoop);
 #endif
 
   LED_HIGH;
