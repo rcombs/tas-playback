@@ -10,6 +10,6 @@ App(
     fap_icon="images/tas_playback.png",  # 10x10 1-bit PNG
     fap_description="Playback TAS files for Nintendo consoles",
     fap_author="rcombs",
-    fap_weburl="https://github.com/user/tas_playback",
+    fap_weburl="https://github.com/rcombs/tas-playback",
     fap_icon_assets="images",  # Image assets to compile for this application
 )
