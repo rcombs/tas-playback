@@ -25,9 +25,13 @@
 #include "crc_table.h"
 
 #ifdef TEENSYDUINO
+#include <BufferedPrint.h>
+#include <FreeStack.h>
+#include <RingBuf.h>
+#include <SdFat.h>
+#include <sdios.h>
 #include <SdFatConfig.h>
 #include <MinimumSerial.h>
-#include <SdFat.h>
 #include <DMAChannel.h>
 #include <EEPROM.h>
 
@@ -35,6 +39,8 @@
 #define PIT_LTMR64H             (*(volatile uint32_t *)0x400370E0) // PIT Upper Lifetime Timer Register
 #define PIT_LTMR64L             (*(volatile uint32_t *)0x400370E4) // PIT Lower Lifetime Timer Register
 #endif
+
+#define SD_CONFIG SdSpiConfig(SDCARD_SS_PIN, SHARED_SPI, SD_SCK_MHZ(50))
 
 #define STATUS_PIN 13
 #define POWER_PIN 32
@@ -1237,8 +1243,12 @@ void setup()
   // Let the VI pin interrupt anything other than controller pins
 //  NVIC_SET_PRIORITY(IRQ_PORTC, 16);
 
+#ifndef SD_CONFIG
+#define SD_CONFIG BUILTIN_SDCARD
+#endif
+
   // Initialize SD card
-  if (!sd.begin(BUILTIN_SDCARD)) {
+  if (!sd.begin(SD_CONFIG)) {
     Serial.println(F("E:SD initialization failed!"));
     return;
   }
