@@ -1137,13 +1137,19 @@ void loop()
   mainLoop();
 #ifdef HAVE_EEPROM
   if (doLoop) {
+    static bool isClearing = false;
     uint64_t curTime = read64Timer();
-    if ((finished && timer64Started && (curTime - finalTime) > (MICRO_BUS_CYCLES * 1000 * 1000 * 30))
+
+    if ((finished && timer64Started && (curTime - finalTime) > (MICRO_BUS_CYCLES * 1000 * 1000 * (isClearing ? 1 : 30)))
 //        || (timer64Started && (curTime - lastFrameTime) > (MICRO_BUS_CYCLES * 1000 * 1000 * 30))
        ) {
       setPower("0");
       while ((read64Timer() - curTime) < (MICRO_BUS_CYCLES * 1000 * 1000 * 2));
-      runEEPROM();
+      isClearing = !isClearing;
+      if (isClearing)
+        openTAS("clear.m64");
+      else
+        runEEPROM();
     }
   }
 #endif
