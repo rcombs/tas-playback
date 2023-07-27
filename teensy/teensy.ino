@@ -1021,6 +1021,8 @@ static void setEEPROM(const String& cmd)
     }
   }
   EEPROM.write(j, 0);
+
+  lockedPrintln("L:Finished writing to EEPROM:", cmd.c_str());
 }
 #endif
 
