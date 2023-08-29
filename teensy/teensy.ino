@@ -109,7 +109,7 @@ static Console console = N64;
 static bool skippingInput = false;
 static String inputString;
 
-static char n64_raw_dump[36]; // maximum recv is 1+2+32 bytes + 1 bit
+static unsigned char n64_raw_dump[36]; // maximum recv is 1+2+32 bytes + 1 bit
 // n64_raw_dump does not include the command byte. That gets pushed into
 // n64_command:
 static int n64_command;
