@@ -169,6 +169,8 @@ template<class A, class B> void lockedPrintln(const A& a, const B& b)
 
 #ifdef ARM_DWT_CYCCNT
 
+#ifndef TEENSYDUINO
+
 static void startTimer()
 {
   ARM_DWT_CYCCNT = 0;
@@ -183,6 +185,28 @@ static uint32_t readAndResetTimer()
 {
   return __atomic_exchange_n(&ARM_DWT_CYCCNT, 0, __ATOMIC_SEQ_CST);
 }
+
+#else
+
+static uint32_t timerOffset;
+
+static void startTimer()
+{
+  timerOffset = ARM_DWT_CYCCNT;
+}
+
+static uint32_t readTimer()
+{
+  return ARM_DWT_CYCCNT - timerOffset;
+}
+
+static uint32_t readAndResetTimer()
+{
+  uint32_t currentTime = ARM_DWT_CYCCNT;
+  return currentTime - __atomic_exchange_n(&timerOffset, ARM_DWT_CYCCNT, __ATOMIC_SEQ_CST);
+}
+
+#endif
 
 #endif
 
