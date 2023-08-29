@@ -221,12 +221,14 @@ static void start64Timer()
   PIT_MCR = 0x00;
 
   // Timer 1
+  PIT_CVAL1 = 0x0; // set initial value of timer 1 to 0
   PIT_TCTRL1 = 0x0; // disable timer 1 and its interrupts
   PIT_LDVAL1 = 0xFFFFFFFF; // setup timer 1 for maximum counting period
   PIT_TCTRL1 |= PIT_TCTRL_CHN; // chain timer 1 to timer 0
   PIT_TCTRL1 |= PIT_TCTRL_TEN; // start timer 1
 
   // Timer 0
+  PIT_CVAL0 = 0x0; // set initial value of timer 0 to 0
   PIT_TCTRL0 = 0; // disable timer 0 and its interrupts
   PIT_LDVAL0 = 0xFFFFFFFF; // setup timer 0 for maximum counting period
   PIT_TCTRL0 = PIT_TCTRL_TEN; // start timer 0
