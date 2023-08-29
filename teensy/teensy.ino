@@ -1016,7 +1016,7 @@ static void snesClockInterrupt()
 static void setEEPROM(const String& cmd)
 {
   // Write terminator first, so we won't overread (by much) if we die early
-  EEPROM.write(cmd.length(), 0);
+  EEPROM.write(cmd.length() + 1, 0);
   unsigned j = 0;
   for (unsigned i = 0; i < cmd.length(); i++, j++) {
     if (cmd[i] == '\\' && cmd[i + 1] == 'n') {
@@ -1029,6 +1029,7 @@ static void setEEPROM(const String& cmd)
       EEPROM.write(j, cmd[i]);
     }
   }
+  EEPROM.write(j++, '\n');
   EEPROM.write(j, 0);
 
   lockedPrintln("L:Finished writing to EEPROM:", cmd.c_str());
