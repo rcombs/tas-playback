@@ -75,7 +75,7 @@
 #define LED_HIGH (CORE_PIN13_PORTSET = CORE_PIN13_BITMASK) //digitalWriteFast(STATUS_PIN, HIGH)
 #define LED_LOW (CORE_PIN13_PORTCLEAR = CORE_PIN13_BITMASK) //digitalWriteFast(STATUS_PIN, LOW)
 
-#define SERIAL_TIMEOUT_US 5000000
+#define SERIAL_TIMEOUT_US 5000000ULL
 
 #define DISABLE_N64_INTERRUPT() \
   volatile uint32_t *config = portConfigRegister(N64_PIN); \
