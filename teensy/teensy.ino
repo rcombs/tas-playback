@@ -127,6 +127,7 @@ static void updateInputBuffer();
 
 static bool hold = false;
 static bool finished = false;
+static bool havePaired = false;
 
 static SdFile tasFile;
 
@@ -665,6 +666,7 @@ static bool openTAS(const String& path) {
     numFrames = newNumFrames;
     console = N64;
     filename = basename(path);
+    havePaired = false;
     interrupts();
 
     setupConsole();
@@ -832,6 +834,7 @@ fail:
 
 static void n64Interrupt()
 {
+    bool validCommand = true;
     noInterrupts();
 
     unsigned char data, addr;
@@ -868,11 +871,7 @@ static void n64Interrupt()
             output_buffer[2] = 0x01;
 
             n64_send(output_buffer, 3, 1);
-            logFromISR("P:%ld", viCount);
-            viCount = 0;
-#ifdef PIT_LTMR64H
-            start64Timer();
-#endif
+            logFromISR("L:Got ident, cmd 0x%02x", n64_command);
             break;
         case 0x01:
             haveFrame = (!finished && bufferHasData);
@@ -982,13 +981,23 @@ static void n64Interrupt()
             break;
 
         default:
+            validCommand = false;
+            logFromISR("W:Unknown; %d read; b:%02hhx; %d since; %d/%d to 1/2", edgesRead, n64_command, ticksSinceLast, firstEdgeTime, secondEdgeTime);
             if (finished)
               break;
-            logFromISR("W:Unknown; %d read; b:%02hhx; %d since; %d/%d to 1/2", edgesRead, n64_command, ticksSinceLast, firstEdgeTime, secondEdgeTime);
             if (curFrame > 100)
               logFromISR("D:inval");
             waitForIdle(1000);
             break;
+    }
+
+    if (!havePaired && validCommand) {
+  #ifdef PIT_LTMR64H
+      start64Timer();
+  #endif
+      viCount = 0;
+      havePaired = true;
+      logFromISR("P:%ld,0x%02x", viCount, n64_command);
     }
 
 #ifdef ENABLE_N64_INTERRUPT
