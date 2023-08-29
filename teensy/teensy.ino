@@ -501,10 +501,12 @@ String hextobin(const String& hex)
 static SdFile writeFile;
 
 static void appendData(const String& data) {
-  if (writeFile.write(data.c_str(), data.length()) == data.length())
+  if (writeFile.write(data.c_str(), data.length()) == data.length()) {
     Serial.println("AP:OK");
-  else
+  } else {
+    printSDError("append");
     Serial.println("AP:NAK");
+  }
 }
 
 static void waitForIdle(unsigned us)
@@ -656,7 +658,8 @@ static void updateInputBuffer() {
 
     int readBytes = tasFile.read(inputBuffer + writePos, availableSize);
     if (readBytes <= 0) {
-      lockedPrintln(F("W:Failed to read next inputs from file. (This is recoverable)"));
+      lockedPrintln(F("W:Failed to read input frames (recoverable): "));
+      printSDError("read");
       return;
     }
 
@@ -1043,6 +1046,7 @@ static void handleCommand(const String& cmd)
     if (writeFile.open(&sd, cmd.substring(3).c_str(), O_WRITE | O_CREAT | O_TRUNC)) {
       lockedPrintln("CR:OK");
     } else {
+      printSDError("append");
       lockedPrintln("CR:NAK");
     }
   } else if (cmd.startsWith("AP:")) {
