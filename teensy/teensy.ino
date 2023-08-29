@@ -34,6 +34,7 @@
 #include <MinimumSerial.h>
 #include <DMAChannel.h>
 #include <EEPROM.h>
+#include <SD.h>
 
 #ifdef USB1_PORTSC1
 #define SERIAL_CONNECTED_CHECK (!bitRead(USB1_PORTSC1,7))
