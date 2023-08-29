@@ -1225,7 +1225,11 @@ void setup()
   Serial.begin(SERIAL_BAUD_RATE);
 
 #ifdef SERIAL_TIMEOUT_US
-  while (!Serial) {
+#ifndef SERIAL_CONNECTED_CHECK
+#define SERIAL_CONNECTED_CHECK (!!Serial)
+#endif
+
+  while (!SERIAL_CONNECTED_CHECK) {
     if (readTimer() > MICRO_CYCLES * SERIAL_TIMEOUT_US) {
       doLoop = 1;
       break;
