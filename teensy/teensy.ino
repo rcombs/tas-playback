@@ -35,6 +35,12 @@
 #include <DMAChannel.h>
 #include <EEPROM.h>
 
+#ifdef USB1_PORTSC1
+#define SERIAL_CONNECTED_CHECK (!bitRead(USB1_PORTSC1,7))
+#else
+#define SERIAL_CONNECTED_CHECK (!bitRead(USB0_OTGSTAT,5))
+#endif
+
 #ifndef PIT_LTMR64H
 #define PIT_LTMR64H             (*(volatile uint32_t *)0x400370E0) // PIT Upper Lifetime Timer Register
 #define PIT_LTMR64L             (*(volatile uint32_t *)0x400370E4) // PIT Lower Lifetime Timer Register
