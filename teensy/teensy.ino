@@ -199,6 +199,21 @@ template<class A, class B> void lockedPrintln(const A& a, const B& b)
   interrupts();
 }
 
+void printSDError(const char* msg) {
+  (void)msg;
+  if (sd.sdErrorCode()) {
+    noInterrupts();
+    if (sd.sdErrorCode() == SD_CARD_ERROR_ACMD41) {
+      Serial.println("W:Try power cycling the SD card.");
+    }
+    Serial.print("W:");
+    printSdErrorSymbol(&Serial, sd.sdErrorCode());
+    Serial.print(", ErrorData: 0X");
+    Serial.println(sd.sdErrorData(), HEX);
+    interrupts();
+  }
+}
+
 #ifdef ARM_DWT_CYCCNT
 
 #ifndef TEENSYDUINO
@@ -1261,18 +1276,6 @@ static void viInterrupt()
   viCount++;
 }
 #endif
-
-void printSDError(const char* msg) {
-  (void)msg;
-  if (sd.sdErrorCode()) {
-    if (sd.sdErrorCode() == SD_CARD_ERROR_ACMD41) {
-      Serial.println("Try power cycling the SD card.");
-    }
-    printSdErrorSymbol(&Serial, sd.sdErrorCode());
-    Serial.print(", ErrorData: 0X");
-    Serial.println(sd.sdErrorData(), HEX);
-  }
-}
 
 void setup()
 {
