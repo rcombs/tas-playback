@@ -1031,7 +1031,9 @@ static void setEEPROM(const String& cmd)
 
 static void handleCommand(const String& cmd)
 {
-  if (cmd.startsWith("M:")) {
+  if (cmd.length() == 0) {
+    //dummy
+  } else if (cmd.startsWith("M:")) {
     openTAS(cmd.substring(2));
   } else if (cmd.startsWith("O:")) {
     //dummy
