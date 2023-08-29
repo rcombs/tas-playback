@@ -22,8 +22,6 @@
  * OTHER DEALINGS IN THE SOFTWARE.
  */
 
-#include "crc_table.h"
-
 #ifdef TEENSYDUINO
 #include <BufferedPrint.h>
 #include <FreeStack.h>
