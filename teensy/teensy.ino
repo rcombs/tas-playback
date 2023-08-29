@@ -41,11 +41,23 @@
 #endif
 
 #ifndef PIT_LTMR64H
+#if ARDUINO_TEENSY35 || ARDUINO_TEENSY36
 #define PIT_LTMR64H             (*(volatile uint32_t *)0x400370E0) // PIT Upper Lifetime Timer Register
 #define PIT_LTMR64L             (*(volatile uint32_t *)0x400370E4) // PIT Lower Lifetime Timer Register
+#elif
+#error "Missing PIT_LTMR64H"
+#endif
 #endif
 
+#if ARDUINO_TEENSY35 || ARDUINO_TEENSY36
+#define ENABLE_PIT_CLOCK() SIM_SCGC6 |= SIM_SCGC6_PIT
 #define SD_CONFIG SdSpiConfig(SDCARD_SS_PIN, SHARED_SPI, SD_SCK_MHZ(50))
+#endif
+
+#ifdef ARDUINO_TEENSY41
+#define SD_CONFIG SdioConfig(FIFO_SDIO)
+#define MICRO_BUS_CYCLES 24
+#endif
 
 #define STATUS_PIN 13
 #define POWER_PIN 32
@@ -75,21 +87,35 @@
 
 #define SERIAL_TIMEOUT_US 5000000ULL
 
-#define DISABLE_N64_INTERRUPT() \
-  volatile uint32_t *config = portConfigRegister(N64_PIN); \
-  uint32_t oldConfig = *config; \
-  *config &= ~0x000F0000;
+#ifdef ARDUINO_TEENSY41
+
 #define ENABLE_N64_INTERRUPT() \
-  *config = oldConfig;
-#endif
+  *(&CORE_PIN38_PORTREG + 6) = CORE_PIN38_BITMASK;
+
+#else // ARDUINO_TEENSY41
+
+#define DISABLE_N64_INTERRUPT() \
+  uint32_t oldConfig = N64_CONFIG; \
+  N64_CONFIG &= ~0x000F0000;
+#define ENABLE_N64_INTERRUPT() \
+  N64_CONFIG = oldConfig;
+
+#endif // ARDUINO_TEENSY41
+
+#endif // TEENSYDUINO
 
 #define INPUT_BUFFER_SIZE 2048 // Multiples of 512 are ideal since we can read 256*4/2 = 512 bytes at once.
 // 512 bytes is an optimization for reading the sd card and skips using another buffer.
 
 #define INPUT_BUFFER_UPDATE_TIMEOUT 10 // 10 ms
 
+#if !defined(F_CPU)
+#define F_CPU (uint64_t)F_CPU_ACTUAL
+#endif
+
 #define MICRO_CYCLES (F_CPU / 1000000)
-#ifdef F_BUS
+
+#if !defined(MICRO_BUS_CYCLES) && defined(F_BUS)
 #define MICRO_BUS_CYCLES (F_BUS / 1000000ULL)
 #endif
 
@@ -222,7 +248,9 @@ static bool timer64Started = false;
 static void start64Timer()
 {
   // turn on PIT
-  SIM_SCGC6 |= SIM_SCGC6_PIT;
+#ifdef ENABLE_PIT_CLOCK
+  ENABLE_PIT_CLOCK();
+#endif
   __asm__ volatile("nop"); // solves timing problem on Teensy 3.5
   PIT_MCR = 0x00;
 
@@ -1315,6 +1343,9 @@ void setup()
   // Let the controller pins interrupt anything else
 #ifdef IRQ_PORTC
   NVIC_SET_PRIORITY(IRQ_PORTC, 0);
+#endif
+#ifdef ARDUINO_TEENSY41
+  NVIC_SET_PRIORITY(IRQ_GPIO6789, 0);
 #endif
 
   // Let the VI pin interrupt anything other than controller pins
