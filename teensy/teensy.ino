@@ -117,6 +117,8 @@ static int n64_command;
 // maximum we'll need to send is 33, 32 for a read request and 1 CRC byte
 static unsigned char output_buffer[33];
 
+static bool has_peripheral = false;
+
 // Simple switch buffer. (If buffer A fails to load while buffer B is in use,
 // we still okay, and will try again next loop)
 static unsigned char inputBuffer[INPUT_BUFFER_SIZE];
@@ -832,12 +834,30 @@ fail:
     LED_LOW;
 }
 
+unsigned char n64_crc(unsigned char *data)
+{
+    int i;
+    unsigned char crc = 0;
+    for (i = 0; i <= 32; i++)
+    {
+        int mask;
+        for (mask = 0x80; mask >= 1; mask >>= 1)
+        {
+            int xor_tap = (crc & 0x80) ? 0x85 : 0x00;
+            crc <<= 1;
+            if (i != 0x20 && (data[i] & mask))
+                crc |= 1;
+            crc ^= xor_tap;
+        }
+    }
+    return crc;
+}
+
 static void n64Interrupt()
 {
     bool validCommand = true;
     noInterrupts();
 
-    unsigned char data, addr;
     int ticksSinceLast = readAndResetTimer();
     bool haveFrame;
 
@@ -868,7 +888,7 @@ static void n64Interrupt()
             // it won't work without it.
             output_buffer[0] = 0x05;
             output_buffer[1] = 0x00;
-            output_buffer[2] = 0x01;
+            output_buffer[2] = has_peripheral ? 0x01 : 0x02;
 
             n64_send(output_buffer, 3, 1);
             logFromISR("L:Got ident, cmd 0x%02x", n64_command);
@@ -916,11 +936,13 @@ static void n64Interrupt()
 
             // Assume it's a read for 0x8000, which is the only thing it should
             // be requesting anyways
-            memset(output_buffer, 0x80, 32);
-            output_buffer[32] = 0xB8; // CRC
+            memset(output_buffer, has_peripheral ? 0x80 : 0x00, 32);
+            output_buffer[32] = n64_crc(&output_buffer[0]);
+            if (!has_peripheral)
+              output_buffer[32] ^= 0xff;
 
             n64_send(output_buffer, 33, 1);
-            logFromISR("L:Got a read, what?");
+            logFromISR("L:Got read, addr 0x%02x%02x", n64_raw_dump[0], n64_raw_dump[1]);
 
             //Serial.println("It was 0x02: the read command");
             break;
@@ -930,45 +952,16 @@ static void n64Interrupt()
             // rumble! All other write addresses are ignored. (but we still
             // need to return a CRC)
 
-            // decode the first data byte (fourth overall byte), bits indexed
-            // at 24 through 31
-            data = 0;
-            data |= (n64_raw_dump[16] != 0) << 7;
-            data |= (n64_raw_dump[17] != 0) << 6;
-            data |= (n64_raw_dump[18] != 0) << 5;
-            data |= (n64_raw_dump[19] != 0) << 4;
-            data |= (n64_raw_dump[20] != 0) << 3;
-            data |= (n64_raw_dump[21] != 0) << 2;
-            data |= (n64_raw_dump[22] != 0) << 1;
-            data |= (n64_raw_dump[23] != 0);
-
             // get crc byte, invert it, as per the protocol for
             // having a memory card attached
-            output_buffer[0] = crc_repeating_table[data] ^ 0xFF;
+            output_buffer[0] = n64_crc(&n64_raw_dump[2]);
+            if (!has_peripheral)
+              output_buffer[0] ^= 0xff;
 
             // send it
             n64_send(output_buffer, 1, 1);
-            logFromISR("L:Got a write, what?");
 
-            // end of time critical code
-            // was the address the rumble latch at 0xC000?
-            // decode the first half of the address, bits
-            // 8 through 15
-            addr = 0;
-            addr |= (n64_raw_dump[0] != 0) << 7;
-            addr |= (n64_raw_dump[1] != 0) << 6;
-            addr |= (n64_raw_dump[2] != 0) << 5;
-            addr |= (n64_raw_dump[3] != 0) << 4;
-            addr |= (n64_raw_dump[4] != 0) << 3;
-            addr |= (n64_raw_dump[5] != 0) << 2;
-            addr |= (n64_raw_dump[6] != 0) << 1;
-            addr |= (n64_raw_dump[7] != 0);
-
-            //Serial.println("It was 0x03: the write command");
-            //Serial.print("Addr was 0x");
-            //Serial.print(addr, HEX);
-            //Serial.print(" and data was 0x");
-            //Serial.println(data, HEX);
+            logFromISR("L:Got write, addr 0x%02x%02x, data 0x%02x~0x%02x", n64_raw_dump[0], n64_raw_dump[1], n64_raw_dump[2], n64_raw_dump[33]);
             break;
 
         case -1:
