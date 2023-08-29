@@ -798,7 +798,7 @@ static void get_n64_command()
               case (0x03):
                   // write command
                   // we expect a 2 byte address and 32 bytes of data
-                  bitcount += 272; // 34 bytes * 8 bits per byte
+                  bitcount += (2 + 32) * 8; // 34 bytes * 8 bits per byte
                   //Serial.println("command is 0x03, write");
                   break;
               case (0x02):
