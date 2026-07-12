@@ -1312,10 +1312,14 @@ void setup()
   startTimer();
 
 #ifdef SERIAL_TIMEOUT_US
-  while (readTimer() > MICRO_CYCLES * 1000 * 1000);
+  while (readTimer() < MICRO_CYCLES * 1000 * 500);
 #endif
 
   Serial.begin(SERIAL_BAUD_RATE);
+
+#ifdef SERIAL_TIMEOUT_US
+  while (readTimer() < MICRO_CYCLES * 1000 * 2000);
+#endif
 
 #ifdef SERIAL_TIMEOUT_US
 #ifndef SERIAL_CONNECTED_CHECK
