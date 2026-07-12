@@ -770,9 +770,9 @@ static void n64_send(unsigned char *buffer, char length, bool wide_stop)
     char bit = (buffer[i >> 3] >> (7 - (i & 7))) & 1;
     target = MICRO_CYCLES * (3 - bit * 2);
     while (readTimer() < target);
-      N64_HIGH;
+    N64_HIGH;
     while (readTimer() < MICRO_CYCLES * 4);
-      N64_LOW;
+    N64_LOW;
     startTimer();
   }
 
