@@ -1112,6 +1112,24 @@ static void setEEPROM(const String& cmd)
 
   lockedPrintln("L:Finished writing to EEPROM:", cmd.c_str());
 }
+
+static void readEEPROM()
+{
+  String str;
+  for (unsigned i = 0;; i++) {
+    char c = EEPROM.read(i);
+    if (c == 0)
+      break;
+    else if (c == '\n')
+      str += "\\n";
+    else if (c == '\\')
+      str += "\\";
+    else
+      str += c;
+  }
+
+  lockedPrintln("RN:", str.c_str());
+}
 #endif
 
 static void handleCommand(const String& cmd)
@@ -1161,6 +1179,8 @@ static void handleCommand(const String& cmd)
 #ifdef HAVE_EEPROM
   } else if (cmd.startsWith("WN:")) {
     setEEPROM(cmd.substring(3));
+  } else if (cmd.startsWith("RN:")) {
+    readEEPROM();
 #endif
   } else if (cmd.startsWith("LO:")) {
     setLoop(cmd.substring(3));
