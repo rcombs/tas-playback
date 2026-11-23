@@ -231,9 +231,9 @@ static uint32_t readTimer()
   return ARM_DWT_CYCCNT;
 }
 
-static uint32_t readAndResetTimer()
+static uint32_t readAndResetTimer(int32_t offset = 0)
 {
-  return __atomic_exchange_n(&ARM_DWT_CYCCNT, 0, __ATOMIC_SEQ_CST);
+  return __atomic_exchange_n(&ARM_DWT_CYCCNT, -offset, __ATOMIC_SEQ_CST);
 }
 
 #else
@@ -250,10 +250,10 @@ static uint32_t readTimer()
   return ARM_DWT_CYCCNT - timerOffset;
 }
 
-static uint32_t readAndResetTimer()
+static uint32_t readAndResetTimer(int32_t offset = 0)
 {
-  uint32_t currentTime = ARM_DWT_CYCCNT;
-  return currentTime - __atomic_exchange_n(&timerOffset, ARM_DWT_CYCCNT, __ATOMIC_SEQ_CST);
+  uint32_t currentTime = ARM_DWT_CYCCNT - offset;
+  return currentTime - __atomic_exchange_n(&timerOffset, currentTime, __ATOMIC_SEQ_CST);
 }
 
 #endif
@@ -902,7 +902,11 @@ static void n64Interrupt()
     bool validCommand = true;
     noInterrupts();
 
-    int ticksSinceLast = readAndResetTimer();
+#ifndef FIRST_OFFSET
+#define FIRST_OFFSET 0
+#endif
+
+    int ticksSinceLast = readAndResetTimer(FIRST_OFFSET);
     bool haveFrame;
 
 #ifdef DISABLE_N64_INTERRUPT
