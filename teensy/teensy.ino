@@ -57,6 +57,7 @@
 #ifdef ARDUINO_TEENSY41
 #define SD_CONFIG SdioConfig(FIFO_SDIO)
 #define MICRO_BUS_CYCLES 24
+#define HAVE_REBOOT
 #endif
 
 #define STATUS_PIN 13
@@ -1094,6 +1095,14 @@ static void snesClockInterrupt()
 }
 #endif
 
+#ifdef HAVE_REBOOT
+static void doReboot() {
+    USB1_USBCMD = 0; // disconnect USB
+    delay(50);       // enough time for USB hubs/ports to detect disconnect
+    SCB_AIRCR = 0x05FA0004;
+}
+#endif
+
 #ifdef HAVE_EEPROM
 static void setEEPROM(const String& cmd)
 {
@@ -1185,6 +1194,10 @@ static void handleCommand(const String& cmd)
     setEEPROM(cmd.substring(3));
   } else if (cmd.startsWith("RN:")) {
     readEEPROM();
+#endif
+#ifdef HAVE_REBOOT
+  } else if (cmd.startsWith("RB:")) {
+    doReboot();
 #endif
   } else if (cmd.startsWith("LO:")) {
     setLoop(cmd.substring(3));
